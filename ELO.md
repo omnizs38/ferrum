@@ -245,6 +245,17 @@ What was tried, with measured results:
 - Corpus caveat: games are from this project's own engine vs SF at
   short TC, i.e. tactics-heavy, opening-correlated labels — only a
   sample-correlated distillation exists, not SPSA-equivalent coverage.
+- **Moderated positional patch** (4-match amplification pass + bishop
+  pair/shield only, hand PST/material kept): 30-game A/B vs committed
+  base at 100 ms → **+23 Elo (8–6–16, CI [−104,157])**, not a clear
+  win, and bench d8 rose to 57042 nodes (+41%). Reverted per the
+  keep-on-clear-win bar (`git checkout HEAD -- src/eval.rs`). Bench
+  back to 40439.
+- Fresh SF 2000 anchor (committed build, 300 ms): pending at write
+  time; earlier razor build lost both visible games (2/10, 0–2–0);
+  no evidence of convergence toward beating Stockfish — the fair
+  reading is the unchanged ~1800–1900 band vs SF 2000 at 300–500 ms
+  and ~1470–1500 at 1 ms.
 
 Verified unchanged: full test suites green (both variants, debug +
 release), perft suites match CPW, UCI end-to-end green, bench

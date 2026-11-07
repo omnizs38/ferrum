@@ -75,11 +75,7 @@ pub fn run() {
                 // A search may still be running from the previous game;
                 // stop and join it before swapping board/TT so its result
                 // never lands in the new game.
-                stop_flag.store(true, Ordering::Relaxed);
-                if let Some(h) = search_handle.take() {
-                    let _ = h.join();
-                }
-                stop_flag = Arc::new(AtomicBool::new(false));
+                stop_and_join(&mut search_handle, &mut stop_flag);
                 board = Board::startpos();
                 tt = TranspositionTable::new(hash_mb);
                 game_hashes.clear();
@@ -113,15 +109,15 @@ pub fn run() {
                 }
             }
             "position" => {
+                // Same rule as ucinewgame: once the position changes, any
+                // in-flight search is on a stale position. Stop, join and
+                // then reset, so no stale bestmove lands in the new game.
+                stop_and_join(&mut search_handle, &mut stop_flag);
                 board = parse_position(trimmed, &mut game_hashes);
             }
             "go" => {
-                // Stop any previous search.
-                stop_flag.store(true, Ordering::Relaxed);
-                if let Some(h) = search_handle.take() {
-                    let _ = h.join();
-                }
-                stop_flag = Arc::new(AtomicBool::new(false));
+                // Stop any previous search before starting a new one.
+                stop_and_join(&mut search_handle, &mut stop_flag);
                 let limits = parse_go(trimmed, &board);
                 let tt_clone = tt.clone();
                 let board_clone = board.clone();
@@ -147,10 +143,7 @@ pub fn run() {
                 stop_flag.store(true, Ordering::Relaxed);
             }
             "quit" => {
-                stop_flag.store(true, Ordering::Relaxed);
-                if let Some(h) = search_handle.take() {
-                    let _ = h.join();
-                }
+                stop_and_join(&mut search_handle, &mut stop_flag);
                 break;
             }
             // ---- debug / test commands (not part of the UCI spec) ----
@@ -193,10 +186,19 @@ pub fn run() {
         }
     }
     // Ensure the search thread finished.
+    stop_and_join(&mut search_handle, &mut stop_flag);
+}
+
+/// Stop any running search, wait for it, and reset the shared flag so the
+/// next search starts unblocked. The joined thread prints its `bestmove`
+/// (possibly `bestmove (none)` if stopped before finishing) before any
+/// caller resets board/TT, so ordering on stdout is preserved.
+fn stop_and_join(search_handle: &mut Option<std::thread::JoinHandle<()>>, stop_flag: &mut Arc<AtomicBool>) {
+    stop_flag.store(true, Ordering::Relaxed);
     if let Some(h) = search_handle.take() {
-        stop_flag.store(true, Ordering::Relaxed);
         let _ = h.join();
     }
+    *stop_flag = Arc::new(AtomicBool::new(false));
 }
 
 fn parse_position(cmd: &str, game_hashes: &mut Vec<u64>) -> Board {

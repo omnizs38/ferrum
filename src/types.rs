@@ -75,14 +75,8 @@ pub struct Move {
     pub is_castle_q: bool,
 }
 
-impl Default for Move {
-    fn default() -> Move {
-        Move::new(0, 0, None)
-    }
-}
-
 impl Move {
-    pub fn new(from: u8, to: u8, promo: Option<PieceType>) -> Move {
+    pub const fn new(from: u8, to: u8, promo: Option<PieceType>) -> Move {
         Move {
             from,
             to,
@@ -167,19 +161,9 @@ pub fn square_to_str(sq: u8) -> String {
 /// Backed by a stack array so `generate_moves` costs no heap allocation.
 pub const MAX_MOVES: usize = 256;
 
-// Pre-fill constant for fixed-size move arrays: building the array from a
-// const instead of calling the (non-const) `Default::default()` keeps the
-// initialisation a straight `memcpy` of a constant.
-const EMPTY_MOVE: Move = Move {
-    from: 0,
-    to: 0,
-    promo: None,
-    is_capture: false,
-    is_en_passant: false,
-    is_double_push: false,
-    is_castle_k: false,
-    is_castle_q: false,
-};
+// Pre-fill constant for fixed-size move arrays (a const, so the array
+// initialisation is a straight copy of a constant, not work per element).
+const EMPTY_MOVE: Move = Move::new(0, 0, None);
 
 #[derive(Clone, Debug)]
 pub struct MoveList {

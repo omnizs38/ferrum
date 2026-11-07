@@ -123,12 +123,17 @@ Representation notes:
 
 * Perft against the Chess Programming Wiki reference counts:
   startpos `20/400/8902`, Kiwipete `48/2039/97862`, en-passant position
-  `14/191/2812/43238` — all asserted in `board::tests`.
+  `14/191/2812/43238`, promotion position 4 `6/264/9467/422333` and
+  position 5 `44/1486/62379/2103487` — all asserted in `board::tests`.
 * Search: mate-in-one (`Qxf7#`), win-of-queen (`Nxa8`), stop-flag handling,
   legal root move — in `search::tests` and `examples/tactics.rs`.
 * UCI end-to-end (handshake, `go depth`, mate-in-one, clock + `stop`,
-  `Threads`/`Hash` options) — `tests/uci_smoke.rs` spawns the real binary
-  via `CARGO_BIN_EXE_ferrum`.
+  `Threads`/`Hash` options, `ucinewgame` full reset) — `tests/uci_smoke.rs`
+  spawns the real binary via `CARGO_BIN_EXE_ferrum`.
+* Protocol rule: while a search is running, `stop` stops it and `position` /
+  `ucinewgame` stop-and-join it (printing its `bestmove`, possibly
+  `bestmove (none)`) before the board/TT reset — a stale bestmove is never
+  attributed to a new position.
 
 ## Notes on Elo
 

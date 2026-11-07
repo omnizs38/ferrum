@@ -106,16 +106,24 @@ but ~15% faster: d8 12.8 ms vs 15 ms; kept for speed, scores identical).
 All 6–20-game intervals overlap (±300), but the direction is
 consistent: aggressive pruning and guessed eval weights lose despite
 depth, because they widen nodes (eval) or prune tactics (null/LMR).
-Code is therefore the baseline search/eval (bench 39961 with
-aspiration 50 + SEE) with six retained node-neutral speed changes:
-Lazy SMP helpers are detached so `bestmove` returns when the main
-thread finishes instead of idling for helpers (+100 ms latency fix),
-null-move/LMR are Gamma-only (see Alpha scaling), passed-pawn mask
+Code is therefore the baseline search/eval with six retained node-neutral
+speed changes: Lazy SMP helpers are detached so `bestmove` returns when
+the main thread finishes instead of idling for helpers (+100 ms latency
+fix), null-move/LMR are Gamma-only (see Alpha scaling), passed-pawn mask
 and incremental material+PST (both keep scores identical, ~15% faster),
 TT single-lock probe_both (one lock per non-PV node, 60785 unchanged),
 check-extension cap at depth 12 (60785 unchanged, neutral), aspiration
 delta 50 (40882 nodes, −33% vs 60785, neutral Elo), and SEE pruning
 in qsearch (39961 nodes, ~1911 vs 1892, neutral).
+
+> Bench drift note: the 39961/40882 figures were measured on the
+> code states described above. The current tree re-searches a late move
+> whenever its score lands inside the window at **any** node (previously
+> PV nodes only), a correctness fix that propagates exact scores at cut
+> nodes; that costs roughly +12–15% nodes. Bench d8 on the current
+> snapshot (this section, 2026-11-07, release build, startpos):
+> **45838 nodes**. The strength numbers quoted here are tied to the
+> describe-states they were measured on.
 
 Longer TC did not close the gap: reverted Gamma vs SF 2000 at **1000 ms,
 Threads 4: 1–4–1, ~1809** (`results/gauntlet_gamma_sf2000_1000.json`).
@@ -123,6 +131,41 @@ Stockfish scales better with time than our ray-stepping movegen +
 mobility eval at ~4 Mnps. Next work would need search-speed
 (movegen/eval optimisation) and full SPSA over 30+ game samples,
 not hand-tuned margins.
+
+### 2026-11-07 session — safety hardening, coverage, sanity gauntlets
+
+Work items (node-neutral vs the previous snapshot; bench d8
+45838 → 45838): hard ply cap in `negamax` (was a latent OOB-index panic
+path past `MAX_PLY`, now returns static eval like qsearch); `ucinewgame`
+**and** `position` stop-and-join any running search before resetting
+state (previously a stale `bestmove` could be printed after the reset
+and misattributed by a pipelineing GUI); `ucinewgame` semantics covered
+by a new `tests/uci_smoke.rs` case; `board::tests` gained the two
+remaining CPW reference positions 4 (`6/264/9467/422333`) and 5
+(`44/1486/62379/2103487`) — both match the wiki, promotion/castling
+paths now verified; `MoveList` prefilled from a const; `Move::default`
+collapsed into `const fn Move::new`; gauntlet moved to the shared
+`stop_and_join` helper. Full suite green (debug + release, both
+variants). A two-axis code review (standards + spec) was run on the
+session diff; its findings were applied (duplicated helper, guard
+placement, undocumented-tool removal — `tools/uci_drive.py` was dropped
+in favour of the smoke test; docs drift in README/ELO.md fixed here).
+
+Measurements (fresh builds from the session tree):
+
+| Match (fixed `movetime`) | Score (Ferrum–SF) | Est. Elo | 95% CI |
+|---|---|---|---|
+| Gamma (Threads 2) vs Alpha (Threads 1), 50 ms, 20 g | 15–4–1 | ~+215 | 65–543 |
+| Gamma (Threads 2) vs Alpha (Threads 1), 100 ms, 10 g | 5–4–1 | ~+35 | −199–313 |
+| Gamma (Threads 4) vs SF 2000, 300 ms, 10 g | 2–7–1 | ~−191 | −2400–13 (p=0.25 → ≈ ~1810 anchor) |
+
+The 100 ms 10-game sample is uninformative noise next to the 20-game
+50 ms result and the established ladder gap; the SF 2000 anchor at
+300 ms lands in the same ~1800–1900 band as the prior calibration rows
+(the search is node-identical vs the calibrated build). Raw JSON
+(git-ignored): `results/gauntlet_gamma_alpha_50ms_20g.json`,
+`results/gauntlet_gamma_alpha_2026-11-07.json` (100 ms),
+`results/gauntlet_gamma_sf2000_300_2026-11-07.json`.
 
 ## Alpha (lightweight, `--no-default-features`)
 

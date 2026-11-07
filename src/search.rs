@@ -240,13 +240,6 @@ impl Searcher {
         // Alpha has no null-move, so the flag is unused there.
         #[cfg(not(feature = "qsearch"))]
         let _ = allow_null;
-        // Hard ply cap: check extensions can keep `depth` high for very
-        // long checking sequences, so bound `ply` explicitly. Without this
-        // guard an extreme line would index past the killer/PV arrays.
-        // Like qsearch, fall back to the static evaluation.
-        if ply >= MAX_PLY - 1 {
-            return (evaluate(board), None);
-        }
         // Repetition / draw shortcuts (not at the root).
         if ply > 0 {
             if board.halfmove >= 100 {
@@ -258,6 +251,16 @@ impl Searcher {
             if self.is_repetition(board) {
                 return (0, None);
             }
+        }
+        // Hard ply cap, just past the draw shortcuts (a horizon, not a
+        // cutoff): check extensions can keep `depth` high in long checking
+        // sequences, so bound `ply` explicitly. Without this guard an
+        // extreme line would index past the killer/PV arrays. Like
+        // qsearch, fall back to the static evaluation — mate scores are
+        // therefore approximate at the very end of the line, which is
+        // unreachable in real games.
+        if ply >= MAX_PLY - 1 {
+            return (evaluate(board), None);
         }
         if self.should_stop() {
             return (0, None);

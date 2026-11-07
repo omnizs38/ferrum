@@ -89,6 +89,18 @@ fn uci_handshake_and_search() {
     let mv = best.split_whitespace().nth(1).unwrap_or("");
     assert!(mv.len() == 4 || mv.len() == 5, "unexpected threads bestmove '{mv}'");
 
+    // ucinewgame must fully reset state: the board returns to the start
+    // position and the next search is a legal, ordinary search of it.
+    send("position fen rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 2");
+    send("ucinewgame");
+    send("d");
+    let fen = recv_until("rnbqkbnr/pppppppp");
+    assert!(fen.starts_with("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"));
+    send("go depth 2");
+    let best = recv_until("bestmove");
+    let mv = best.split_whitespace().nth(1).unwrap_or("");
+    assert_eq!(mv.len(), 4, "bestmove after ucinewgame should be a plain startpos move, got '{mv}'");
+
     send("quit");
     let _ = child.wait_timeout(Duration::from_secs(5));
     // `wait_timeout` needs `wait` fallback for portability.

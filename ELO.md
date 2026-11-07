@@ -259,6 +259,24 @@ What was tried, with measured results:
   2–7–1 era check) overlap heavily, so "razoring adds Elo" cannot be
   claimed from this sample alone. **Ferrum still does not beat
   Stockfish.**
+- **Texel closed definitively:** refitting on the full 94 310-position
+  corpus (holdout 90/10, Adam) gave holdout RMSE **400 vs 388**
+  hand-written — fitting *generalizes worse* on complete data. The
+  distillation program is abandoned; corpus/tooling kept for the
+  record.
+- **Slider attack tables (4c453e8, kept):** new `src/sliders.rs` —
+  per-square ≤12-bit relevant-ray occupancy → attacks (2×2 MiB,
+  built once at startup by explicit loops; exhaustive test vs ray
+  walking over every occupancy). Query: BMI2 PEXT (rt-detected) or
+  portable compaction. No magic constants; design rule intact. Node
+  output identical (bench d8 = **40439**, unchanged). ~15–20% faster
+  bench nps. A/B vs base at 100 ms, 30 games: **13–6–11, +83**
+  (CI [−40,231]), direction consistent with faster search at fixed
+  TC. With this build: SF 2000 at 300 ms → **2–7–1**
+  ([−191], CI [−2400,13],
+  `results/gauntlet_gamma_sf2000_300_sliders.json`) — indistinguishable
+  from the previous anchors (4–6–0 and 2–7–1), so the slider rewrite
+  yields speed but no verified Elo gain at 300 ms.
 
 Verified unchanged: full test suites green (both variants, debug +
 release), perft suites match CPW, UCI end-to-end green, bench

@@ -251,11 +251,14 @@ What was tried, with measured results:
   win, and bench d8 rose to 57042 nodes (+41%). Reverted per the
   keep-on-clear-win bar (`git checkout HEAD -- src/eval.rs`). Bench
   back to 40439.
-- Fresh SF 2000 anchor (committed build, 300 ms): pending at write
-  time; earlier razor build lost both visible games (2/10, 0–2–0);
-  no evidence of convergence toward beating Stockfish — the fair
-  reading is the unchanged ~1800–1900 band vs SF 2000 at 300–500 ms
-  and ~1470–1500 at 1 ms.
+- Fresh SF 2000 anchor (committed build with razoring, 10 games at
+  300 ms): **4–6–0, p=0.400, −70 (CI [−389,150])**
+  (`results/gauntlet_gamma_sf2000_300_final.json`) — Ferrum's best
+  recorded 300 ms result at this anchor, but well within the prior
+  ~1800–1900 band; the two razor-containing builds (this and the
+  2–7–1 era check) overlap heavily, so "razoring adds Elo" cannot be
+  claimed from this sample alone. **Ferrum still does not beat
+  Stockfish.**
 
 Verified unchanged: full test suites green (both variants, debug +
 release), perft suites match CPW, UCI end-to-end green, bench

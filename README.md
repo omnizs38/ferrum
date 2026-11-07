@@ -143,7 +143,9 @@ targets 2000–2400 and Alpha 1200–1500; earlier calibration put Gamma at
 bottom-of-target and Alpha above target (see `ELO.md` for the current
 numbers after the latest strength/scaling work). Estimates move
 with TC, Hash and Threads — always use the `--release` build, and prefer
-more games / longer controls over single short matches. Hitting 2200+
+more games / longer controls over single short matches. At
+`go movetime 1` Ferrum measures ≈ 1470–1500 vs Stockfish anchors (see
+`ELO.md`); the 2000 target is a ≥300 ms target, not a 1 ms one. Hitting 2200+
 would require more strength work (deeper search, better eval) rather
 than better testing.
 

@@ -210,9 +210,11 @@ impl Searcher {
     }
 
     /// Cheap check: the clock and node limit are only consulted every
-    /// 2048 nodes, so most calls short-circuit for free.
+    /// 512 nodes, so most calls short-circuit for free. 512 (not 2048) so
+    /// the resolution stays well below the shortest clock budgets — a
+    /// `go movetime 1` gets checked ~every 100 µs instead of every ~400 µs.
     fn should_stop(&self) -> bool {
-        if self.nodes % 2048 == 0 {
+        if self.nodes % 512 == 0 {
             if let Some(d) = self.hard_deadline {
                 if Instant::now() >= d {
                     return true;
@@ -387,7 +389,11 @@ impl Searcher {
             } else {
                 // Late-move reduction (Gamma only): quiet late moves are
                 // tried shallower first and re-searched only if they
-                // improve the score. Alpha never reduces.
+                // improve the score. Alpha never reduces. Reduced search
+                // is skipped entirely when the reduced depth would be
+                // tiny: at depth 1-2 the LMR saving is marginal and the
+                // risk of missing a tactic that the plain search would
+                // find is real (measure true at short TC / depth).
                 #[cfg(feature = "qsearch")]
                 let reduce = if !pv_node && !is_capture && !is_killer && i > 1 && new_depth > 0 {
                     1

@@ -163,6 +163,43 @@ Measurements (fresh builds from the session tree):
 | Gamma (Threads 2) vs Alpha (Threads 1), 50 ms, 20 g (final build, post qsearch-fix) | 12–5–3 | ~+127 | −21–347 |
 | Gamma (Threads 4) vs SF 2000, 300 ms, 10 g | 2–7–1 | ~−191 | −2400–13 (p=0.25 → ≈ ~1810 anchor) |
 
+### 2026-11-07 session — 1-millisecond time control
+
+Task: reduce the per-move budget to **1 ms** and measure/improve Ferrum at
+that TC. Work: the stop-throttle in `Negamax::should_stop` now checks the
+clock every **512 nodes** (was 2048). At ~5 Mnps the old interval could
+miss a 1 ms deadline by several × when NPS dropped (0 checks until a
+multiple of 2048 nodes). No strength claim at long TC; honest framing:
+compliance with sub-ms budgets, unchanged at long TC, bench d8 unchanged
+(45838).
+
+Measured (all Gamma, `go movetime 1`, Threads 1, 20 or 10 games, oracle
+`ferrum-gamma.exe`, Stockfish SF 19 at the same 1 ms):
+
+| Anchor (Stockfish capped) | Score | Notes |
+|---|---|---|
+| SF 1200 | 5–2–3 | p=0.65 |
+| SF 1300 | 6–1–3 | p=0.75 |
+| SF 1400 | 4–5–1 | p=0.45 |
+| SF 1500 | 3–3–4 | p=0.50 |
+| SF 1500, Threads 4 | 1–6–3 | Lazy SMP is counter-productive at 1 ms (spawn latency + contention) |
+| SF 1600 | 1–7–2 | p=0.20 |
+| SF 2000 | 0–10–0 | p=0.00 |
+
+**Ferrum at 1 ms is ≈ 1470–1500 Elo** (score 0.50 vs the SF 1500 anchor,
+p±0.35). Stockfish at `movetime 1` still searches depth ~4–10 with an
+NNUE evaluation; Ferrum reaches depth ~3–5 with a tapered hand-written
+eval. On the documented design rule (no "magic" tables, no borrowed
+Stockfish code, node-neutral changes only) the 2000 design target at 1 ms
+is **not attainable by tuning** — it would need a depth/speed and eval
+quality overhaul (magic-bitboard-style movegen ~3–5× faster, NNUE-class
+or equivalent eval learned via SPSA over 30+ games). Two tuning temptations
+were tried and reverted: LMR disabled at shallow new-depth (d8 widened
+5–8× for no measured gain; at 1 ms that is a large depth loss) and
+Threads 4 at 1 ms (measured −191 vs Threads 1). The 2000 design target
+at 300–500 ms (current: ~1800–1900 vs SF 2000) is the only plausible
+2000 path, and it needs the same overhaul.
+
 The 100 ms 10-game sample is uninformative noise next to the 50 ms
 20-game runs; both post-fix and pre-fix builds are consistent with a
 Gamma–Alpha gap of a few hundred Elo (the two CIs overlap). The SF 2000

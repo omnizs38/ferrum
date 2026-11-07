@@ -72,6 +72,14 @@ pub fn run() {
                 let _ = out.flush();
             }
             "ucinewgame" => {
+                // A search may still be running from the previous game;
+                // stop and join it before swapping board/TT so its result
+                // never lands in the new game.
+                stop_flag.store(true, Ordering::Relaxed);
+                if let Some(h) = search_handle.take() {
+                    let _ = h.join();
+                }
+                stop_flag = Arc::new(AtomicBool::new(false));
                 board = Board::startpos();
                 tt = TranspositionTable::new(hash_mb);
                 game_hashes.clear();

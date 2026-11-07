@@ -240,6 +240,13 @@ impl Searcher {
         // Alpha has no null-move, so the flag is unused there.
         #[cfg(not(feature = "qsearch"))]
         let _ = allow_null;
+        // Hard ply cap: check extensions can keep `depth` high for very
+        // long checking sequences, so bound `ply` explicitly. Without this
+        // guard an extreme line would index past the killer/PV arrays.
+        // Like qsearch, fall back to the static evaluation.
+        if ply >= MAX_PLY - 1 {
+            return (evaluate(board), None);
+        }
         // Repetition / draw shortcuts (not at the root).
         if ply > 0 {
             if board.halfmove >= 100 {

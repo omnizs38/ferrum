@@ -167,6 +167,20 @@ pub fn square_to_str(sq: u8) -> String {
 /// Backed by a stack array so `generate_moves` costs no heap allocation.
 pub const MAX_MOVES: usize = 256;
 
+// Pre-fill constant for fixed-size move arrays: building the array from a
+// const instead of calling the (non-const) `Default::default()` keeps the
+// initialisation a straight `memcpy` of a constant.
+const EMPTY_MOVE: Move = Move {
+    from: 0,
+    to: 0,
+    promo: None,
+    is_capture: false,
+    is_en_passant: false,
+    is_double_push: false,
+    is_castle_k: false,
+    is_castle_q: false,
+};
+
 #[derive(Clone, Debug)]
 pub struct MoveList {
     pub moves: [Move; MAX_MOVES],
@@ -175,7 +189,7 @@ pub struct MoveList {
 
 impl MoveList {
     pub fn new() -> MoveList {
-        MoveList { moves: [Move::default(); MAX_MOVES], len: 0 }
+        MoveList { moves: [EMPTY_MOVE; MAX_MOVES], len: 0 }
     }
     pub fn push(&mut self, m: Move) {
         if self.len < MAX_MOVES {

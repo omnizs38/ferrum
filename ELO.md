@@ -144,7 +144,10 @@ by a new `tests/uci_smoke.rs` case; `board::tests` gained the two
 remaining CPW reference positions 4 (`6/264/9467/422333`) and 5
 (`44/1486/62379/2103487`) — both match the wiki, promotion/castling
 paths now verified; `MoveList` prefilled from a const; `Move::default`
-collapsed into `const fn Move::new`; gauntlet moved to the shared
+collapsed into `const fn Move::new`; qsearch delta pruning now counts
+the +800 promotion swing (a winning silent promotion could be pruned
+at high alpha — same class as the existing capture/en-passant accounting;
+node-neutral on startpos bench); gauntlet moved to the shared
 `stop_and_join` helper. Full suite green (debug + release, both
 variants). A two-axis code review (standards + spec) was run on the
 session diff; its findings were applied (duplicated helper, guard
@@ -157,15 +160,20 @@ Measurements (fresh builds from the session tree):
 |---|---|---|---|
 | Gamma (Threads 2) vs Alpha (Threads 1), 50 ms, 20 g | 15–4–1 | ~+215 | 65–543 |
 | Gamma (Threads 2) vs Alpha (Threads 1), 100 ms, 10 g | 5–4–1 | ~+35 | −199–313 |
+| Gamma (Threads 2) vs Alpha (Threads 1), 50 ms, 20 g (final build, post qsearch-fix) | 12–5–3 | ~+127 | −21–347 |
 | Gamma (Threads 4) vs SF 2000, 300 ms, 10 g | 2–7–1 | ~−191 | −2400–13 (p=0.25 → ≈ ~1810 anchor) |
 
-The 100 ms 10-game sample is uninformative noise next to the 20-game
-50 ms result and the established ladder gap; the SF 2000 anchor at
-300 ms lands in the same ~1800–1900 band as the prior calibration rows
-(the search is node-identical vs the calibrated build). Raw JSON
-(git-ignored): `results/gauntlet_gamma_alpha_50ms_20g.json`,
+The 100 ms 10-game sample is uninformative noise next to the 50 ms
+20-game runs; both post-fix and pre-fix builds are consistent with a
+Gamma–Alpha gap of a few hundred Elo (the two CIs overlap). The SF 2000
+anchor at 300 ms lands in the same ~1800–1900 band as the prior
+calibration rows (the search is node-identical vs the calibrated build).
+Raw JSON (git-ignored): `results/gauntlet_gamma_alpha_50ms_20g.json`,
+`results/gauntlet_gamma_alpha_50ms_20g_v2.json` (final build),
 `results/gauntlet_gamma_alpha_2026-11-07.json` (100 ms),
-`results/gauntlet_gamma_sf2000_300_2026-11-07.json`.
+`results/gauntlet_gamma_sf2000_300_2026-11-07.json`. All 9 checkmates in
+the SF 2000 match were independently re-verified as true mates with
+`tools/verify_mates.py` (perft 1 == 0, mate score, `bestmove (none)`).
 
 ## Alpha (lightweight, `--no-default-features`)
 

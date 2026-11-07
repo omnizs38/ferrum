@@ -503,9 +503,13 @@ impl Searcher {
         for i in 0..moves.len() {
             let m = moves.as_slice()[i];
             // Delta pruning (pre-make): skip if even winning the victim
-            // cannot reach alpha.
+            // cannot reach alpha. Silent promotions are tactical too, and
+            // they are worth far more than the pawn push's nominal 0, so
+            // count the promotion gain (queen-pawn material swing) or a
+            // winning promotion would be pruned at a high alpha.
             let victim = captured_value_from_board(board, &m);
-            if !in_check && stand_pat + victim + 200 < alpha {
+            let promo_gain = if m.promo.is_some() { 800 } else { 0 };
+            if !in_check && stand_pat + victim + promo_gain + 200 < alpha {
                 continue;
             }
             // SEE pruning (pre-make): skip captures that lose material

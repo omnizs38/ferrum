@@ -2,11 +2,10 @@
 //!
 //! Bit 0 = a1, bit 63 = h8. Leaper (knight, king, pawn) attacks are
 //! precomputed tables built at startup by looping over the board — no magic
-//! numbers, so the tables can be verified by inspection. Sliding attacks
-//! (rook, bishop, queen) step along precomputed neighbour squares
-//! (one step per direction per square, built once) until a blocker is met.
-//! That is still easy to understand, but avoids file/rank arithmetic in the
-//! inner loop, which is where ray-stepping dominated node time.
+//! numbers, so the tables can be verified by inspection. Slider attacks
+//! (rook, bishop, queen) use the occupancy-indexed tables in
+//! [`crate::sliders`], built at startup by explicit loops and validated
+//! exhaustively against ray walking.
 
 use crate::types::Color;
 use std::sync::OnceLock;
@@ -42,13 +41,6 @@ struct Tables {
     // pawn would block its passed status (same/adjacent files, in front).
     passed_white: [Bitboard; 64],
     passed_black: [Bitboard; 64],
-    // step[sq][d] = the square one step from `sq` in direction `d`, or
-    // 255 when that step leaves the board. Directions:
-    // 0 N (0,1), 1 S (0,-1), 2 E (1,0), 3 W (-1,0),
-    // 4 NE (1,1), 5 NW (-1,1), 6 SE (1,-1), 7 SW (-1,-1).
-    // Sliding attacks walk this table so the inner loop is a lookup +
-    // bit test with no file/rank arithmetic per square.
-    step: [[u8; 8]; 64],
 }
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
@@ -62,18 +54,6 @@ fn build_tables() -> Tables {
     let mut pawn_attackers_black = [0u64; 64];
     let mut passed_white = [0u64; 64];
     let mut passed_black = [0u64; 64];
-    let mut step = [[255u8; 8]; 64];
-    // (df, dr) in the step-table order documented on `Tables::step`.
-    let dirs = [
-        (0i32, 1i32),   // 0 N
-        (0i32, -1i32),  // 1 S
-        (1i32, 0i32),   // 2 E
-        (-1i32, 0i32),  // 3 W
-        (1i32, 1i32),   // 4 NE
-        (-1i32, 1i32),  // 5 NW
-        (1i32, -1i32),  // 6 SE
-        (-1i32, -1i32), // 7 SW
-    ];
     for sq in 0..64u8 {
         let (f, r) = (file_of(sq) as i32, rank_of(sq) as i32);
         // Knight: 8 L-shapes.
@@ -125,15 +105,7 @@ fn build_tables() -> Tables {
                 pawn_attackers_black[sq as usize] |= bit((br * 8 + nf) as u8);
             }
         }
-        // One neighbour square per direction (255 = off board).
-        for (d, &(df, dr)) in dirs.iter().enumerate() {
-            let nf = f + df;
-            let nr = r + dr;
-            if (0..8).contains(&nf) && (0..8).contains(&nr) {
-                step[sq as usize][d] = (nr * 8 + nf) as u8;
-            }
-        }
-        // Passed-pawn masks: squares in front on same/adjacent files.
+            // Passed-pawn masks: squares in front on same/adjacent files.
         // White pawn advances toward higher ranks; Black toward lower.
         for &df in &[-1, 0, 1] {
             let nf = f + df;
@@ -148,7 +120,7 @@ fn build_tables() -> Tables {
             }
         }
     }
-    Tables { knight, king, pawn_white, pawn_black, pawn_attackers_white, pawn_attackers_black, passed_white, passed_black, step }
+    Tables { knight, king, pawn_white, pawn_black, pawn_attackers_white, pawn_attackers_black, passed_white, passed_black }
 }
 
 pub fn knight_attacks(sq: u8) -> Bitboard {
@@ -187,38 +159,19 @@ pub fn passed_pawn_mask(sq: u8, color: Color) -> Bitboard {
     }
 }
 
+/// Piece attacks (ray stepping first): the module only wires the fast
+/// path in via [`crate::sliders`], which is validated exhaustively against
+/// ray walking at startup-table build time.
 pub fn rook_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
-    sliding_attacks(sq, occupied, &[0, 1, 2, 3])
+    crate::sliders::rook_attacks(sq, occupied)
 }
 
 pub fn bishop_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
-    sliding_attacks(sq, occupied, &[4, 6, 5, 7])
+    crate::sliders::bishop_attacks(sq, occupied)
 }
 
 pub fn queen_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
     rook_attacks(sq, occupied) | bishop_attacks(sq, occupied)
-}
-
-/// Walk each direction from `sq`, collecting squares until (and including)
-/// the first occupied square (a blocker stops the ray). Each step is one
-/// table lookup to the next square, so the inner loop is cheap.
-fn sliding_attacks(sq: u8, occupied: Bitboard, dirs: &[usize]) -> Bitboard {
-    let t = TABLES.get_or_init(build_tables);
-    let mut attacks = 0u64;
-    for &d in dirs {
-        let mut cur = sq;
-        loop {
-            cur = t.step[cur as usize][d];
-            if cur == 255 {
-                break;
-            }
-            attacks |= bit(cur);
-            if occupied & bit(cur) != 0 {
-                break;
-            }
-        }
-    }
-    attacks
 }
 
 /// Is `target` attacked by any piece of colour `attacker`?

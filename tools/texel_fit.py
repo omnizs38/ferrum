@@ -156,6 +156,31 @@ if __name__ == "__main__":
         Wf = fit(lam, epochs=800, lr=0.1, mask=train_mask)
         holdout_report(Wf, "train", train_mask)
         holdout_report(Wf, "holdout", hold_mask)
+        # Shrink fitted weights toward the hand-written tables
+        ALPHA = 0.35
+        Ws = {
+            "mat": ALPHA * Wf["mat"] + (1 - ALPHA) * W0_mat,
+            "emat": ALPHA * Wf["emat"] + (1 - ALPHA) * W0_emat,
+            "pmg": ALPHA * Wf["pmg"] + (1 - ALPHA) * W0_p[:384],
+            "peg": ALPHA * Wf["peg"] + (1 - ALPHA) * W0_p[384:],
+            "pos": W0_pos.copy(),  # positional untouched for a clean isolate
+        }
+        holdout_report(Ws, "train (shrunk)", train_mask)
+        holdout_report(Ws, "holdout (shrunk)", hold_mask)
+        mg_tab = Ws["pmg"].reshape(6, 64).astype(int).tolist()
+        eg_tab = Ws["peg"].reshape(6, 64).astype(int).tolist()
+        out = {
+            "mg_value": Ws["mat"].astype(int).tolist(),
+            "eg_value": Ws["emat"].astype(int).tolist(),
+            "pst_mg": mg_tab,
+            "pst_eg": eg_tab,
+            "positional": Ws["pos"].astype(float).tolist(),
+            "alpha_shrink": ALPHA,
+            "lambda": lam,
+        }
+        with open("results/texel_fit_shrunk.json", "w") as fh:
+            json.dump(out, fh)
+        print("wrote results/texel_fit_shrunk.json")
         # dump tables for eval.rs
         mg_tab = Wf["pmg"].reshape(6, 64).astype(int).tolist()
         eg_tab = Wf["peg"].reshape(6, 64).astype(int).tolist()

@@ -270,6 +270,17 @@ impl Searcher {
         self.nodes += 1;
 
         let in_check = board.is_in_check(board.side);
+        // Razoring (Gamma only): at very low depth, a position whose static
+        // evaluation is hopeless against beta has no future in the full
+        // search — drop straight into qsearch. `pv_node` is excluded so the
+        // principal variation is never truncated.
+        #[cfg(feature = "qsearch")]
+        if depth <= 2 && !pv_node && !in_check {
+            let sp = evaluate(board);
+            if sp + 250 < beta {
+                return (self.qsearch(board, alpha, beta, ply), None);
+            }
+        }
         // Check extension (capped, Gamma-only via the `qsearch` feature):
         // checks deserve extra depth because tactics hide there, but an
         // uncapped extension explodes in checking sequences (10 checks =

@@ -212,6 +212,55 @@ Raw JSON (git-ignored): `results/gauntlet_gamma_alpha_50ms_20g.json`,
 the SF 2000 match were independently re-verified as true mates with
 `tools/verify_mates.py` (perft 1 == 0, mate score, `bestmove (none)`).
 
+### 2026-11-08 session — "beat Stockfish" objective: honesty check and strength hunt
+
+Objective: make Gamma strong enough to beat Stockfish. Status: **not
+achieved — no honest path to it from inside this repo in one session.**
+What was tried, with measured results:
+
+- **qsearch TT (qTT)**: probed/stored depth-0 entries in qsearch. The
+  windowed qsearch (delta + SEE pruning) makes returned values
+  window-dependent, not position-dependent — an "Exact" entry replayed
+  under a different alpha widened the tree from 45838 to 83765 nodes
+  (+83%). No sound reuse exists without window-qualified entries, so
+  the experiment was fully reverted. Bench back to 45838.
+- **Razoring** (kept): at depth ≤ 2, non-PV, in qsearch's favour below
+  beta by 250, drop into qsearch. Fixed-depth nodes 45838 → 40439
+  (−12%, scores unchanged on startpos). A/B vs base: 6–4–10
+  (+35 Elo, CI overlaps 0) at 50 ms — neutral-to-positive, kept.
+- **Texel/distillation tuning of the eval** (failed): built a
+  94 310-position corpus from all gauntlet games, labeled it with
+  Stockfish depth-6 scores (tools/build_corpus.py, label_corpus.py,
+  texel.py, ferrum_eval.py), then fitted material values, both PST
+  sets and 14 positional scalars to minimize Huber error vs SF's
+  scores (tools/texel_fit.py, Adam, 90/10 holdout monitoring — holdout
+  RMSE 347 vs 388 start). The fit was *worse in real games*: 30-game
+  gauntlet at 100 ms, Table-fit build vs hand-written base **4–22–4
+  (−241, CI [−488,−113])**. The gap between in-distribution RMSE and
+  real play is exactly the pruning/ordering interaction that textbooks
+  warn about. Reverted to the hand-written tables; the corpus and
+  tooling are committed for future attempts (positional terms of the
+  fit, e.g. passed-pawn and rook-file amplification, are the most
+  plausible starting points but were not re-adopted alone either).
+- Corpus caveat: games are from this project's own engine vs SF at
+  short TC, i.e. tactics-heavy, opening-correlated labels — only a
+  sample-correlated distillation exists, not SPSA-equivalent coverage.
+
+Verified unchanged: full test suites green (both variants, debug +
+release), perft suites match CPW, UCI end-to-end green, bench
+45838 → 40439 after razoring, Gamma≈1500 at 1 ms and ~1800–1900 at
+300–500 ms vs SF 2000 (unchanged). **Stockfish still beats Ferrum at
+every tested TC.** The measurable gap decomposition (see the Stockfish
+comparison above): NNUE ≫ classical eval, ~10–20× node throughput
+(magic bitboards), and measured-pruning parameter fit (SPSA over
+thousands of games). The design rules this project chose (no magic
+numbers, from-scratch eval, understandable code) and the SPSA/NNUE
+infrastructure required are the exact blockers; closing them is a
+project, not a session.
+
+Raw JSON (git-ignored): `results/gauntlet_razor_vs_base_50ms.json`,
+`results/gauntlet_texeltables_vs_base_100ms.json`.
+
 ## Alpha (lightweight, `--no-default-features`)
 
 | Match (fixed `movetime`) | Score (Ferrum–SF) | Est. Elo | 95% CI |

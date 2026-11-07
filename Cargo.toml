@@ -1,0 +1,34 @@
+[package]
+name = "ferrum"
+version = "0.1.0"
+edition = "2021"
+description = "Ferrum — a clean, from-scratch UCI chess engine in Rust (Alpha lightweight / Gamma standard)"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "ferrum"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferrum"
+path = "src/main.rs"
+
+[features]
+# Default build is Ferrum Gamma (the standard version).
+default = ["gamma"]
+# Ferrum Gamma = the standard version: multithreading, full TT, quiescence, advanced eval.
+# Ferrum Alpha = lightweight version: build with `--no-default-features`
+# for single-threaded, small TT, no quiescence, simple evaluation.
+gamma = ["threads", "qsearch", "advanced-eval", "large-tt"]
+threads = []
+qsearch = []
+advanced-eval = []
+large-tt = []
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

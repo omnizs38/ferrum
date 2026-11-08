@@ -303,18 +303,10 @@ impl Searcher {
             }
         }
 
-        // TT probe. Non-PV nodes use a single-lock probe returning both
-        // the ordering move (any depth) and the depth-sufficient entry;
-        // PV nodes need only the ordering move.
-        let tt_move: Option<Move>;
-        let mut tt_entry: Option<crate::tt::Entry> = None;
-        if pv_node {
-            tt_move = self.tt.probe_move(board.hash);
-        } else {
-            let (mv, entry) = self.tt.probe_both(board.hash, depth);
-            tt_move = mv;
-            tt_entry = entry;
-        }
+        // TT probe share the same single lock for both cases: one lock per
+        // node. PV nodes keep the depth-sufficient entry so the singular
+        // extension can use its bound (used only for the bound test).
+        let (tt_move, tt_entry) = self.tt.probe_both(board.hash, depth);
         let mut tt_score: Option<i32> = None;
         if !pv_node {
             if let Some(e) = tt_entry {

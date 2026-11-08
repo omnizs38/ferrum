@@ -284,9 +284,9 @@ release), perft suites match CPW, UCI end-to-end green, bench
 300–500 ms vs SF 2000 (unchanged). **Stockfish still beats Ferrum at
 every tested TC.**
 
-### 2026-11-08 (late) session — playstyles (per the user's directive)
+### 2026-11-08 (late) session — singular extension (rejected) and playstyles (per the user's directive)
 
-Implemented and A/B'd as ordered (same engine level, different style):
+- **Singular extension (rejected):** PV-node, depth ≥ 8, Lower/Exact TT bound, verify the TT move remains best on a shallow verifier; extension = search that one child one ply deeper. Result at this engine's depth profile: **bench nodes were identical (51621) but elapsed nearly doubled** — the extension never triggers at the depths reached at this TC (depth ≪ 8 most of the time), so the cost paid was pure overhead with zero returned depth. Reverted; the TT probe unification it exposed was kept. Lesson: extensions that only fire deep are dead weight at short TC.
 
 - **Gamma "cunning/trap-based"** — advanced-eval gains a loose-material
   hunting bonus: `loose_material(side) * 8/100` cp, where loose =

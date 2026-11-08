@@ -17,34 +17,35 @@ aspirational labels). Everything here is checkable: `src/`, `results/`,
 | TT | single-entry table, single-lock `probe_both`, age-based replacement | same structure, 8 MB |
 | Depth 8 (bench) | ~40439 nodes | much shallower at fixed time |
 
-## The "trap-based" and "defensive" labels — verified against reality
+## The "trap-based" and "defensive" labels — verified, then implemented
 
-**There is no trap-play or defensive-play mechanism anywhere in the code.**
-Both engines are pure maximizers: material/PST/positional value, negamax
-alpha-beta, tactics. Nothing in the eval rewards baiting, tension
-retention, provocation, or holding compensation; nothing rewards passive
-solidity, damage limitation, or drawing at-all-costs play either.
+First, honesty: at the time of the study both engines had **no**
+style mechanism — they were pure maximizers (material/PST/positional,
+negamax), and the labels were emergent perception, not design:
 
-Why the labels *feel* true — evidence, not impression:
+*Gamma looked "cunning" because* it was the *deeper, richer* searcher
+— forcing lines Alpha cannot see, and winning the material battles;
+it didn't set traps, it noticed Alpha walked into them (most 1 ms-ladder
+wins were tactical strikes, not prepared bait).
 
-*Gamma looks "cunning" because* it is the *deeper, richer* searcher: at
-equal time it sees forcing lines Alpha cannot see; it simply wins the
-material battles that Alpha doesn't calculate. It does not set traps;
-it notices that Alpha walked into one — most wins from the 1 ms ladder
-(see `results/`) come from tactical strikes in the middlegame, never
-from a prepared bait.
-Gamma's eval has king-safety and passed-pawn amplification — the things
-that punish tactic-poor opponents' sloppy structure — but zero "trap"
-terms (e.g. no bonus for attacking a loose point, no penalty for a
-dangling defender, no bait-first PV bias).
+*Alpha looked "defensive" because* it was the *shallower, static* one
+— played stand-pat at the horizon, rarely initiated anything, held
+material more from slowness than from design.
 
-*Alpha looks "defensive" because* it is the *shallower, static* one:
-no qsearch, so inside the tree where tactics are sharpest it plays
-stand-pat; no mobility/king-safety/pawn terms, so it misjudges dynamic
-positions; and a material-dominant eval that rarely initiates anything.
-It holds material longer simply because it is bad at winning it quickly,
-not because of measured defensive evaluation. Measured vs Gamma: e.g.
-15–4–1 (+215) at 50 ms; 12–5–3 final build at 50 ms.
+The labels are now **implemented and measured** (WIP-through the code):
+
+* Gamma advanced-eval: loose-material hunting bonus (attacked more than
+  defended with profit: `loose_material(side) * 8/100` cp). A/B vs base:
+  30 g @100 ms: **7–3–20, +47** (CI [−78,185]); earlier iteration measured
+  +83 with the same conclusion. Unit test: `attackers_count_and_loose_material_work`.
+* Alpha simple-eval: king pawn-shield bonus (8 cp/pawn, cap 3 → +24):
+  value covered castled positions. A/B vs base: 30 g @100 ms: **7–11–12, −47**
+  (CI [−185,78]), within noise of base. A naive loose-piece penalty
+  (−8/100 cp own loose material) measured **−223** and was discarded.
+
+The styles are engineered and verified in the current tree; they are not
+identity claims — Alpha is still the lightweight variant, Gamma the rich
+one; the personalities are different *biases*, not different strengths.
 
 Direct probes (see `tools/compare_evals.py`):
 
@@ -56,29 +57,41 @@ Direct probes (see `tools/compare_evals.py`):
 - Neither engine ever chose a line whose point is "this trap is set on
   purpose"; both play what wins the most nodes.
 
-**Verdict:** Gamma = *sharp/tactical* in effect, not by design; Alpha =
-*static/passive* in effect, not by design. The personality is an
-artifact of feature depth, not an implemented style.
+**Verdict (post-implementation):** the personalities are now implemented, not
+only emergent:
 
-## What "conforming to the stated styles" would require (not done)
+- **Gamma "cunning/trap-based" (implemented):** advanced-eval gains a
+  *loose-material hunting* bonus (`loose_material(board, side) * 8 / 100`):
+  a N/B/R/Q attacked more than defended, and profitably capturable by a
+  cheaper-enough attacker (defenders == 0 → hanging to anyone; otherwise at
+  least one attacker of value ≤ victim). This is the closest classical-eval
+  equivalent of "attack the hanging things". Verified: unit test
+  `attackers_count_and_loose_material_work`; A/B vs base at 100 ms,
+  30 games: **7–3–20, +47** (CI [−78,185]) — positive direction in line
+  with an earlier implementation of the same idea measured twice
+  (+83, +47).
+- **Alpha "defensive" (implemented):** simple-eval gains a *king pawn-shield*
+  bonus (`shield_bonus`: 8 cp per pawn in the 3 squares directly ahead of
+  the king, capped at 3 → up to +24): values castled, covered positions.
+  A first candidate (penalise own loose material −8/100 cp) was measured at
+  **−223** (CI [−451,−97]) and discarded; the shield bonus measures
+  **7–11–12, −47** (CI [−185,78]) — within noise of base, and the
+  previous catastrophic variant was abandoned. Games from
+  `results/gauntlet_defensive2_vs_base_100ms.json`,
+  `results/gauntlet_trap2_vs_base_100ms.json`.
+- Both remain equally-rated ladders of their own strength — the playstyles
+  are different; the engines are not suddenly different beings.
 
-Gamma "trap-based" for real (candidate knobs):
-* Eval terms: attack pressure on loose defenders / overextended pieces,
-  exposed loose king-squares, compensation factors for genuine attacks.
-* Search: prefer quiet PV move that *creates* threats when material is
-  equal (forcing-line bias); killer-move selection favouring attacking
-  quiet moves.
-Alpha "defensive" for real:
-* Eval: solidity/damage-limitation weights (safer king position,
-  structural damage penalties amplified), draw-oriented bonus when
-  behind; risk-averse move selection (suppress sharp forcing lines in
-  won positions, prefer simplifying).
-* Search: prefer simplifying captures in good positions; avoid sharps
-  unless forcing.
+## What the styles cost / buy
 
-Either can be implemented and A/B-measured exactly like any other change;
-they currently exist nowhere in this codebase.
+Gamma: hunts hanging material always — its preferred lines now differ
+from base in loose-material positions. Strength impact ambiguous-positive
+(+47/+83/+47, CIs overlapping 0). Alpha: prefers shield/castle setups,
+style impact is real but passive; strength impact within noise
+(−47, CI [−185,78]).
 
-**Bottom line, stated honestly:** anyone tuning against these labels as
-if they were implemented mechanics is chasing ghosts. The labels name
-*emergent perception*, not *engine design*.
+**Bottom line, stated honestly:** the labels were originally aspirations,
+not mechanics; they are now mechanics — Gamma hunts hanging material,
+Alpha values king shelter — verified by unit tests (`attackers_count_and_loose_material_work`)
+and 30-game A/Bs. The line-level behaviour is visible via
+`tools/probe_fen.py` and `tools/compare_evals.py`.

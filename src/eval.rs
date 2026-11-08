@@ -210,6 +210,9 @@ pub fn evaluate(board: &Board) -> i32 {
                 }
             }
         }
+        // Alpha "defensive" playstyle: white's pawn shield in front of the
+        // king is worth protecting; same idea as Gamma's shield but simple.
+        score += shield_bonus(board, Color::White) - shield_bonus(board, Color::Black);
         match board.side {
             Color::White => score,
             Color::Black => -score,
@@ -285,6 +288,8 @@ fn evaluate_color(board: &Board, color: Color) -> i32 {
     bonus += pawn_structure(board, color);
     bonus += rook_files(board, color);
     bonus += king_safety(board, color);
+    // Gamma "cunning" playstyle: hunting loose enemy material is good.
+    bonus += loose_material(board, color) * PRESSURE_CP / 100;
     if bishop_count >= 2 {
         bonus += 30; // bishop pair
     }
@@ -469,6 +474,102 @@ fn king_safety(board: &Board, color: Color) -> i32 {
     (shield * 15).min(45) - (3 - shield.min(3)) * 10
 }
 
+/// Alpha "defensive" playstyle: bonus for pawns shielding your own king,
+/// 8 cp each, up to 24. Only used by the simple (Alpha) evaluation.
+#[cfg(not(feature = "advanced-eval"))]
+fn shield_bonus(board: &Board, color: Color) -> i32 {
+    let ksq = board.king_sq[color.idx()];
+    let kfile = file_of(ksq) as i32;
+    let krank = rank_of(ksq) as i32;
+    let pawns = board.pieces[color.idx() * 6];
+    let dir: i32 = match color {
+        Color::White => 1,
+        Color::Black => -1,
+    };
+    let mut shield = 0i32;
+    for &df in &[-1, 0, 1] {
+        let f = kfile + df;
+        let r = krank + dir;
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = (r * 8 + f) as u8;
+            if pawns & bit(sq) != 0 {
+                shield += 1;
+            }
+        }
+    }
+    shield * 8
+}
+
+/// Number of attacks on `sq` by `attacker` (every piece type), filtered to
+/// attackers whose value is at most `max_value`. Used by the playstyle
+/// term: a piece is only hanging if the attacker profits from the trade.
+pub(crate) fn attackers_leq_count(board: &Board, sq: u8, attacker: Color, max_value: i32) -> i32 {
+    // Attacker values for the cheap-attacker gate: pawn=100, N=320,
+    // B=330, R=500. Queens are counted through the bishop/rook paths
+    // (a queen on a shared ray attacks diagonally and straight at once);
+    // the king only ever counts as an unbounded attacker (max_value ==
+    // i32::MAX), i.e. "is the square defended at all".
+    let base = attacker.idx() * 6;
+    let occ = board.occupied;
+    let mut n = 0i32;
+    // Pawns
+    if 100 <= max_value {
+        n += popcount(pawn_attackers_to(sq, attacker) & board.pieces[base]) as i32;
+    }
+    if 320 <= max_value {
+        n += popcount(knight_attacks(sq) & board.pieces[base + 1]) as i32;
+    }
+    if 330 <= max_value {
+        n += popcount(bishop_attacks(sq, occ) & (board.pieces[base + 2] | board.pieces[base + 4])) as i32;
+    }
+    if 500 <= max_value {
+        n += popcount(rook_attacks(sq, occ) & (board.pieces[base + 3] | board.pieces[base + 4])) as i32;
+    }
+    if max_value == i32::MAX {
+        n += popcount(king_attacks(sq) & board.pieces[base + 5]) as i32;
+    }
+    n
+}
+
+/// Number of attacks on `sq` by `attacker` (every piece type, unfiltered).
+pub(crate) fn attackers_count(board: &Board, sq: u8, attacker: Color) -> i32 {
+    attackers_leq_count(board, sq, attacker, i32::MAX)
+}
+
+/// Loose material of `attacker`'s opponent (N/B/R/Q whose attacker count
+/// exceeds its defences, and that at least one cheap-enough attacker can
+/// profit from), in centipawns. Pins are not modelled — this is a static
+/// heuristic, not a full exchange evaluation.
+fn loose_material(board: &Board, attacker: Color) -> i32 {
+    const LOOSE_VALUE: [i32; 6] = [0, 320, 330, 500, 900, 0];
+    let mut total = 0i32;
+    let enemy_base = attacker.other().idx() * 6;
+    for k in 1..=4usize {
+        let mut bb = board.pieces[enemy_base + k];
+        while bb != 0 {
+            let (sq, rest) = pop_lsb(bb);
+            bb = rest;
+            let attackers = attackers_count(board, sq, attacker);
+            let defenders = attackers_count(board, sq, attacker.other());
+            if attackers > defenders {
+                let cheap = attackers_leq_count(board, sq, attacker, LOOSE_VALUE[k]);
+                if defenders == 0 || cheap > 0 {
+                    total += LOOSE_VALUE[k];
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Playstyle knob: bonus inflicted (Alpha) / awarded (Gamma) per 100 CP of
+/// loose material hunted or hanging. Small on purpose — a nudge, not an
+/// overhaul.
+#[cfg(feature = "advanced-eval")]
+const PRESSURE_CP: i32 = 8;
+#[cfg(not(feature = "advanced-eval"))]
+const PRESSURE_CP: i32 = 8;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +605,29 @@ mod tests {
         let a = evaluate(&b);
         let c = evaluate(&b);
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn attackers_count_and_loose_material_work() {
+        // A black rook on e8 (down the file) and one on a4 (along the rank).
+        // Both attack the white knight on e4; nothing defends it, so the
+        // knight is loose.
+        let b = Board::from_fen("4r3/8/8/8/r3N3/8/8/K7 b - - 0 1").unwrap();
+        assert_eq!(attackers_count(&b, 28, Color::Black), 2);
+        assert_eq!(attackers_count(&b, 28, Color::White), 0);
+        assert_eq!(loose_material(&b, Color::Black), 320); // hanging even to rooks
+        assert_eq!(loose_material(&b, Color::White), 0);
+        // A white pawn on d3 defends the knight: two attackers against one
+        // defender is NOT a free win, and the cheap attackers outside the
+        // trade are rooks (value 500 > 320) — so not loose.
+        let b2 = Board::from_fen("4r3/8/8/8/r3N3/3P4/8/K7 b - - 0 1").unwrap();
+        assert_eq!(attackers_count(&b2, 28, Color::White), 1);
+        assert_eq!(loose_material(&b2, Color::Black), 0);
+        // Two black knights (c5 and f6) attacking the knight, one white pawn
+        // defending: cheap attackers (320 ≤ 320) outnumber the defender — loose.
+        let b3 = Board::from_fen("8/8/5n2/2n5/4N3/3P4/8/K7 b - - 0 1").unwrap();
+        assert_eq!(attackers_count(&b3, 28, Color::Black), 2);
+        assert_eq!(loose_material(&b3, Color::Black), 320);
     }
 
     #[cfg(feature = "advanced-eval")]

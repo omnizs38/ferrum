@@ -282,7 +282,33 @@ Verified unchanged: full test suites green (both variants, debug +
 release), perft suites match CPW, UCI end-to-end green, bench
 45838 → 40439 after razoring, Gamma≈1500 at 1 ms and ~1800–1900 at
 300–500 ms vs SF 2000 (unchanged). **Stockfish still beats Ferrum at
-every tested TC.** The measurable gap decomposition (see the Stockfish
+every tested TC.**
+
+### 2026-11-08 (late) session — playstyles (per the user's directive)
+
+Implemented and A/B'd as ordered (same engine level, different style):
+
+- **Gamma "cunning/trap-based"** — advanced-eval gains a loose-material
+  hunting bonus: `loose_material(side) * 8/100` cp, where loose =
+  N/B/R/Q attacked more than defended **and** profitably capturable
+  (defenders == 0 → any attacker counts; otherwise at least one cheap
+  attacker of value ≤ victim). Unit test:
+  `attackers_count_and_loose_material_work`. A/B vs base, 30 g @100 ms:
+  **7–3–20, +47** (CI [−78,185]); earlier independent sample of the
+  same idea: +83. Kept.
+- **Alpha "defensive"** — simple-eval gains a king pawn-shield bonus:
+  8 cp × pawns in the three squares directly ahead of own king
+  (cap +24). A naive self-hanging-piece penalty (−8/100 cp own loose
+  material) measured **−223** (CI [−451,−97]) and was discarded;
+  the shield bonus measures **7–11–12, −47** (CI [−185,78]) vs base —
+  within noise of base. Kept (it delivers the defensive identity
+  without materially weakening Alpha). Unit test:
+  `attackers_count_and_loose_material_work` covers the shared counter.
+
+Full write-up and verdicts in `docs/variant-styles.md`. The Gamma-Alpha
+ladder is unchanged in spirit: Gamma≈1800–1900 vs SF 2000, Alpha≈1500,
+both with style-biased play. **Stockfish remains unbeaten everywhere
+measured.** The measurable gap decomposition (see the Stockfish
 comparison above): NNUE ≫ classical eval, ~10–20× node throughput
 (magic bitboards), and measured-pruning parameter fit (SPSA over
 thousands of games). The design rules this project chose (no magic

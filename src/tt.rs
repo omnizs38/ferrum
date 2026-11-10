@@ -67,7 +67,7 @@ impl TranspositionTable {
     }
 
     pub fn resize(&mut self, size_mb: usize) {
-        let size_mb = size_mb.max(1).min(MAX_HASH_MB);
+        let size_mb = size_mb.clamp(1, MAX_HASH_MB);
         // Each entry is ~32 bytes; entries = bytes / 32, rounded down to 2^k.
         let bytes = (size_mb * 1024 * 1024) as u64;
         let raw = (bytes / 32).max(1024);

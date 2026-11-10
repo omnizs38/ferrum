@@ -214,7 +214,7 @@ impl Searcher {
     /// the resolution stays well below the shortest clock budgets — a
     /// `go movetime 1` gets checked ~every 100 µs instead of every ~400 µs.
     fn should_stop(&self) -> bool {
-        if self.nodes % 512 == 0 {
+        if self.nodes.is_multiple_of(512) {
             if let Some(d) = self.hard_deadline {
                 if Instant::now() >= d {
                     return true;
@@ -238,6 +238,9 @@ impl Searcher {
     /// two are Gamma-only; Alpha searches every move in full).
     /// `pv_node` marks nodes on the principal variation.
     /// `allow_null` is false for the node right after a null move.
+    // The flat parameter list mirrors the standard negamax signature; a
+    // context struct would only add indirection in the hottest function.
+    #[allow(clippy::too_many_arguments)]
     fn negamax(&mut self, board: &mut Board, depth: i32, mut alpha: i32, beta: i32, ply: usize, pv_node: bool, allow_null: bool) -> (i32, Option<Move>) {
         // Alpha has no null-move, so the flag is unused there.
         #[cfg(not(feature = "qsearch"))]
@@ -566,12 +569,12 @@ impl Searcher {
         let h = board.hash;
         let back = (board.halfmove as usize).min(self.game_hashes.len());
         let start = self.game_hashes.len() - back;
-        if self.game_hashes[start..].iter().any(|&x| x == h) {
+        if self.game_hashes[start..].contains(&h) {
             return true;
         }
         let back = (board.halfmove as usize).min(self.path_hashes.len());
         let start = self.path_hashes.len() - back;
-        if self.path_hashes[start..].iter().any(|&x| x == h) {
+        if self.path_hashes[start..].contains(&h) {
             return true;
         }
         false
@@ -592,21 +595,19 @@ impl Searcher {
     fn order_moves(&self, board: &Board, moves: &mut crate::types::MoveList, tt_move: Option<Move>, ply: usize) {
         // Score into a stack array (no heap allocation per node), then
         // insertion-sort the live slice by descending score.
-        let n = moves.len();
         let mut scores = [0i32; crate::types::MAX_MOVES];
-        for i in 0..n {
-            let m = moves.as_slice()[i];
-            let s = if Some(m) == tt_move {
+        for (i, m) in moves.as_slice().iter().enumerate() {
+            let s = if Some(*m) == tt_move {
                 10_000_000
             } else if m.is_capture || m.promo.is_some() {
                 // SEE ordering tried and measured negative at 500 ms
                 // (nodes rose); MVV-LVA alone is kept.
-                let mut s = 9_000_000 + capture_score(board, &m);
+                let mut s = 9_000_000 + capture_score(board, m);
                 if m.promo.is_some() {
                     s += 1000;
                 }
                 s
-            } else if self.is_killer(m, ply) {
+            } else if self.is_killer(*m, ply) {
                 7_000_000
             } else {
                 let slot = self.slot(board, m.from);
@@ -619,11 +620,9 @@ impl Searcher {
 
     #[cfg(feature = "qsearch")]
     fn order_captures(&self, board: &Board, moves: &mut crate::types::MoveList, _ply: usize) {
-        let n = moves.len();
         let mut scores = [0i32; crate::types::MAX_MOVES];
-        for i in 0..n {
-            let m = moves.as_slice()[i];
-            scores[i] = capture_score(board, &m);
+        for (i, m) in moves.as_slice().iter().enumerate() {
+            scores[i] = capture_score(board, m);
         }
         sort_moves_by_score(moves, &mut scores);
     }
@@ -768,11 +767,7 @@ fn see(board: &Board, m: &Move) -> i32 {
     }
     let mut side = attacker.color.other();
     let mut d = 0usize;
-    loop {
-        let (sq, val) = match least_attacker(board, side, m.to, occ) {
-            Some((s, v)) => (s, v),
-            None => break,
-        };
+    while let Some((sq, val)) = least_attacker(board, side, m.to, occ) {
         d += 1;
         if d >= gain.len() { d -= 1; break; }
         gain[d] = attacker_val - gain[d - 1];

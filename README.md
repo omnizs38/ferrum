@@ -78,24 +78,26 @@ cargo run --release --no-default-features --example bench
 src/
   types.rs    Colours, pieces, Move / MoveList, square <-> string.
   bitboard.rs Bitboard type, precomputed leaper tables (built at startup by
-              looping over the board — no magic numbers), sliding attacks by
-              ray stepping, attack tests. Understandable > magic-fast.
+              looping over the board — no magic numbers), attack tests.
+  sliders.rs  Sliding attacks from occupancy-indexed tables (bishop and rook,
+              64 x 4096 entries each), filled at startup by ray walking.
   board.rs    Board (bitboards + mailbox), Zobrist hashing, FEN I/O,
               pseudo-legal movegen + legality filter, make/unmake with an
               undo stack, perft. King captures are never generated.
   eval.rs     Simple (Alpha) vs advanced tapered (Gamma) evaluation.
               PSTs are White-oriented, rank-8-first tables with a documented
               mirror rule. Advanced adds mobility, doubled/isolated/passed
-              pawns, bishop pair, rook open/semi files and a pawn-shield
-              king-safety term.
+              pawns, bishop pair, rook open/semi files, king-safety, and the
+              Gamma playstyle term (hunting loose material); the simple eval
+              adds Alpha's king-shield term.
   tt.rs       Power-of-two transposition table (hash/depth/flag/score/best/
               age), shared behind a mutex for SMP.
   search.rs   Negamax alpha-beta + PVS, iterative deepening, aspiration
               (re-centered windows — see the comment on the edge case),
-              TT, MVV-LVA + killers + history, check extension, repetition /
-              50-move / insufficient-material draws, mate scored as
-              MATE - ply. Gamma adds null-move pruning, late-move
-              reduction, qsearch (stand-pat, delta pruning, check
+              TT, MVV-LVA + killers + history, check extension, razoring,
+              repetition / 50-move / insufficient-material draws, mate
+              scored as MATE - ply. Gamma adds null-move pruning,
+              late-move reduction, qsearch (stand-pat, delta pruning, check
               evasions) and Lazy SMP; Alpha searches every move in full
               with static eval at the horizon.
   uci.rs      UCI loop: uci/isready/setoption/position/go + in-engine time
@@ -113,11 +115,42 @@ Representation notes:
   for cheap piece lookups. Occupancy is the OR of all bitboards.
 * Zobrist uses a fixed-seed xorshift generator, so hashes are deterministic
   across runs. The hash is maintained incrementally on every make/unmake.
-* Leaper tables are generated at startup by explicit board loops; sliders
-  step along directions until a blocker (see `bitboard.rs`). This trades a
-  little raw speed for code you can verify by inspection.
+* Leaper tables are generated at startup by explicit board loops; sliding
+  attacks come from occupancy-indexed tables (`sliders.rs`) whose contents
+  are filled by ray walking at startup — the ray-stepping part is the
+  table build, the lookup is O(1). This trades a little raw speed for
+  code you can verify by inspection.
 * UCI move matching compares only from/to/promotion (flags such as
   `is_double_push` are generation-dependent and must not break matching).
+
+## Playstyles
+
+The two variants deliberately differ in *bias*, not just depth:
+
+* **Gamma** hunts loose material — the advanced eval adds a bonus for
+  enemy pieces that are attacked more than they are defended.
+* **Alpha** values king shelter — the simple eval adds a bonus for pawns
+  shielding the king.
+
+Both are measured A/B changes, not aspirations; `docs/variant-styles.md`
+has the anatomy, the numbers and the rejected alternatives.
+
+## Tools
+
+Python helpers under `tools/` (stdlib only, except the texel tools, which
+need NumPy):
+
+| Tool | Purpose |
+|---|---|
+| `gauntlet.py` | UCI match harness — plays paired games against another engine or a Stockfish anchor, writes `results/*.json` |
+| `verify_mates.py` | Re-checks mate claims with Ferrum itself (`perft 1 == 0` + mate score) |
+| `session_summary.py` | Tabulates every gauntlet JSON in `results/` into one session table |
+| `probe_fen.py` | Asks an engine for its best move on a FEN (`go depth N`) |
+| `compare_evals.py` | Evaluates a battery of positions with both engines and diffs them |
+| `build_corpus.py` | Builds a (FEN, side-to-move) corpus from the gauntlet games |
+| `label_corpus.py` | Labels that corpus with Stockfish scores |
+| `ferrum_eval.py` | NumPy replica of the Gamma evaluation (used by the tuner) |
+| `texel.py` / `texel_fit.py` | Texel feature extraction and weight fitting against Stockfish labels |
 
 ## Testing
 

@@ -212,12 +212,12 @@ fn parse_position(cmd: &str, game_hashes: &mut Vec<u64>) -> Board {
     }
     let mut board: Board;
     let moves_start;
-    if parts.get(1).map(|s| *s) == Some("startpos") {
+    if parts.get(1).copied() == Some("startpos") {
         board = Board::startpos();
         moves_start = 2;
-    } else if parts.get(1).map(|s| *s) == Some("fen") {
+    } else if parts.get(1).copied() == Some("fen") {
         // FEN is everything until ` moves`.
-        let rest = parts.get(2).map(|s| *s).unwrap_or("");
+        let rest = parts.get(2).copied().unwrap_or("");
         let (fen, moves_part) = match rest.rfind(" moves") {
             Some(i) => (&rest[..i], Some(&rest[i + 6..])),
             None => (rest, None),

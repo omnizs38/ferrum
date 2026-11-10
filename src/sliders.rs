@@ -104,7 +104,7 @@ fn unpack_index(occupied: Bitboard, mask: Bitboard) -> usize {
     let mut m = mask;
     let mut i = 0u32;
     while m != 0 {
-        let lsb = m & m.wrapping_neg();
+        let lsb = m.isolate_lowest_one();
         if (occupied & lsb) != 0 {
             out |= 1 << i;
         }
@@ -134,7 +134,7 @@ fn build_tables() -> SliderTables {
     t
 }
 
-fn fill_table(sq: u8, mask: Bitboard, dirs: &[usize], table: &mut Vec<Bitboard>) {
+fn fill_table(sq: u8, mask: Bitboard, dirs: &[usize], table: &mut [Bitboard]) {
     let bits: Vec<u8> = {
         let mut v = Vec::new();
         let mut m = mask;

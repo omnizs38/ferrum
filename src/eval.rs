@@ -503,6 +503,7 @@ fn shield_bonus(board: &Board, color: Color) -> i32 {
 /// Number of attacks on `sq` by `attacker` (every piece type), filtered to
 /// attackers whose value is at most `max_value`. Used by the playstyle
 /// term: a piece is only hanging if the attacker profits from the trade.
+#[cfg(feature = "advanced-eval")]
 pub(crate) fn attackers_leq_count(board: &Board, sq: u8, attacker: Color, max_value: i32) -> i32 {
     // Attacker values for the cheap-attacker gate: pawn=100, N=320,
     // B=330, R=500. Queens are counted through the bishop/rook paths
@@ -532,6 +533,7 @@ pub(crate) fn attackers_leq_count(board: &Board, sq: u8, attacker: Color, max_va
 }
 
 /// Number of attacks on `sq` by `attacker` (every piece type, unfiltered).
+#[cfg(feature = "advanced-eval")]
 pub(crate) fn attackers_count(board: &Board, sq: u8, attacker: Color) -> i32 {
     attackers_leq_count(board, sq, attacker, i32::MAX)
 }
@@ -540,11 +542,12 @@ pub(crate) fn attackers_count(board: &Board, sq: u8, attacker: Color) -> i32 {
 /// exceeds its defences, and that at least one cheap-enough attacker can
 /// profit from), in centipawns. Pins are not modelled — this is a static
 /// heuristic, not a full exchange evaluation.
+#[cfg(feature = "advanced-eval")]
 fn loose_material(board: &Board, attacker: Color) -> i32 {
     const LOOSE_VALUE: [i32; 6] = [0, 320, 330, 500, 900, 0];
     let mut total = 0i32;
     let enemy_base = attacker.other().idx() * 6;
-    for k in 1..=4usize {
+    for (k, value) in LOOSE_VALUE.iter().enumerate().take(5).skip(1) {
         let mut bb = board.pieces[enemy_base + k];
         while bb != 0 {
             let (sq, rest) = pop_lsb(bb);
@@ -552,9 +555,9 @@ fn loose_material(board: &Board, attacker: Color) -> i32 {
             let attackers = attackers_count(board, sq, attacker);
             let defenders = attackers_count(board, sq, attacker.other());
             if attackers > defenders {
-                let cheap = attackers_leq_count(board, sq, attacker, LOOSE_VALUE[k]);
+                let cheap = attackers_leq_count(board, sq, attacker, *value);
                 if defenders == 0 || cheap > 0 {
-                    total += LOOSE_VALUE[k];
+                    total += *value;
                 }
             }
         }
@@ -566,8 +569,6 @@ fn loose_material(board: &Board, attacker: Color) -> i32 {
 /// loose material hunted or hanging. Small on purpose — a nudge, not an
 /// overhaul.
 #[cfg(feature = "advanced-eval")]
-const PRESSURE_CP: i32 = 8;
-#[cfg(not(feature = "advanced-eval"))]
 const PRESSURE_CP: i32 = 8;
 
 #[cfg(test)]
@@ -607,6 +608,9 @@ mod tests {
         assert_eq!(a, c);
     }
 
+    // The loose-material helpers are Gamma-only (advanced eval), so this
+    // test only exists in the Gamma build.
+    #[cfg(feature = "advanced-eval")]
     #[test]
     fn attackers_count_and_loose_material_work() {
         // A black rook on e8 (down the file) and one on a4 (along the rank).

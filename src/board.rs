@@ -35,19 +35,19 @@ fn zobrist() -> &'static Zobrist {
             state
         };
         let mut piece = [[0u64; 64]; 12];
-        for i in 0..12 {
-            for sq in 0..64 {
-                piece[i][sq] = next();
+        for p in piece.iter_mut() {
+            for sq in p.iter_mut() {
+                *sq = next();
             }
         }
         let side = next();
         let mut castling = [0u64; 16];
-        for i in 0..16 {
-            castling[i] = next();
+        for c in castling.iter_mut() {
+            *c = next();
         }
         let mut ep_file = [0u64; 8];
-        for i in 0..8 {
-            ep_file[i] = next();
+        for e in ep_file.iter_mut() {
+            *e = next();
         }
         Zobrist { piece, side, castling, ep_file }
     })

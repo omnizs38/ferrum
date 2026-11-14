@@ -13,9 +13,12 @@
 use crate::board::Board;
 #[cfg(feature = "qsearch")]
 use crate::bitboard::{bishop_attacks, bit, king_attacks, knight_attacks, pawn_attackers_to, pop_lsb, rook_attacks};
+use crate::bitboard::popcount;
 use crate::eval::evaluate;
 use crate::tt::{Bound, TranspositionTable};
-use crate::types::{Color, Move, PieceType};
+#[cfg(feature = "qsearch")]
+use crate::types::Color;
+use crate::types::{Move, PieceType};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -372,7 +375,7 @@ impl Searcher {
 
         self.path_hashes.push(board.hash);
         for i in 0..moves.len() {
-            let m = moves.moves[i];
+            let m = moves[i];
 
             board.make_move(&m);
             if board.is_in_check(us) {
@@ -593,9 +596,14 @@ impl Searcher {
     }
 
     fn order_moves(&self, board: &Board, moves: &mut crate::types::MoveList, tt_move: Option<Move>, ply: usize) {
-        // Score into a stack array (no heap allocation per node), then
-        // insertion-sort the live slice by descending score.
-        let mut scores = [0i32; crate::types::MAX_MOVES];
+        let n = moves.len();
+        if n <= 1 {
+            return;
+        }
+        // Score into a stack array that is only initialised on write (no
+        // 1 KiB memset per node), then insertion-sort the live slice by
+        // descending score.
+        let mut scores = [std::mem::MaybeUninit::<i32>::uninit(); crate::types::MAX_MOVES];
         for (i, m) in moves.as_slice().iter().enumerate() {
             let s = if Some(*m) == tt_move {
                 10_000_000
@@ -613,18 +621,27 @@ impl Searcher {
                 let slot = self.slot(board, m.from);
                 self.history[slot][m.to as usize]
             };
-            scores[i] = s;
+            scores[i].write(s);
         }
-        sort_moves_by_score(moves, &mut scores);
+        // SAFETY: exactly `n` scores were written above, and the sort only
+        // reads indices below `n`.
+        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
+        sort_moves_by_score(moves, scores);
     }
 
     #[cfg(feature = "qsearch")]
     fn order_captures(&self, board: &Board, moves: &mut crate::types::MoveList, _ply: usize) {
-        let mut scores = [0i32; crate::types::MAX_MOVES];
-        for (i, m) in moves.as_slice().iter().enumerate() {
-            scores[i] = capture_score(board, m);
+        let n = moves.len();
+        if n <= 1 {
+            return;
         }
-        sort_moves_by_score(moves, &mut scores);
+        let mut scores = [std::mem::MaybeUninit::<i32>::uninit(); crate::types::MAX_MOVES];
+        for (i, m) in moves.as_slice().iter().enumerate() {
+            scores[i].write(capture_score(board, m));
+        }
+        // SAFETY: as in `order_moves`.
+        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
+        sort_moves_by_score(moves, scores);
     }
 }
 
@@ -645,7 +662,8 @@ fn capture_score(board: &Board, m: &Move) -> i32 {
 /// Insertion-sort `moves` by descending `scores`. Move lists are short
 /// (tens), so insertion sort is plenty and keeps moves and scores
 /// together without a secondary buffer.
-fn sort_moves_by_score(moves: &mut crate::types::MoveList, scores: &mut [i32; crate::types::MAX_MOVES]) {
+fn sort_moves_by_score(moves: &mut crate::types::MoveList, scores: &mut [i32]) {
+    debug_assert_eq!(scores.len(), moves.len());
     for i in 1..moves.len() {
         let mut j = i;
         while j > 0 && scores[j] > scores[j - 1] {
@@ -792,47 +810,43 @@ fn has_non_pawn_material(board: &Board) -> bool {
 }
 
 pub fn is_insufficient_material(board: &Board) -> bool {
-    // Any pawn, rook or queen can mate → sufficient.
-    let major = board.pieces[0] // white pawns
-        | board.pieces[3]
-        | board.pieces[4]
-        | board.pieces[6]
-        | board.pieces[9]
-        | board.pieces[10];
-    if major != 0 {
+    // Any pawn, rook or queen can mate → sufficient. Pawns are checked
+    // first because they are by far the most common reason to bail out.
+    if board.pieces[0] | board.pieces[6] != 0 {
         return false;
     }
-    // Count minors.
-    let minors: Vec<(Color, PieceType, u8)> = {
-        let mut v = Vec::new();
-        for c in [Color::White, Color::Black] {
-            for k in [PieceType::Knight, PieceType::Bishop] {
-                let mut bb = board.pieces[c.idx() * 6 + k.idx()];
-                while bb != 0 {
-                    let (sq, rest) = crate::bitboard::pop_lsb(bb);
-                    bb = rest;
-                    v.push((c, k, sq));
-                }
-            }
-        }
-        v
-    };
-    if minors.len() <= 1 {
-        return true; // K vs K, K+N/B vs K
+    if board.pieces[3] | board.pieces[4] | board.pieces[9] | board.pieces[10] != 0 {
+        return false;
     }
-    // K+B vs K+B with bishops on the same colour: dead draw.
-    if minors.len() == 2 {
-        let (c1, k1, s1) = minors[0];
-        let (c2, k2, s2) = minors[1];
-        if c1 != c2 && k1 == PieceType::Bishop && k2 == PieceType::Bishop {
-            let col1 = ((s1 / 8 + s1 % 8) & 1) as i32;
-            let col2 = ((s2 / 8 + s2 % 8) & 1) as i32;
-            if col1 == col2 {
-                return true;
+    // Count minors via popcounts: this runs at every search node, so it
+    // must not allocate (the old version collected a Vec of minor pieces
+    // whenever no pawns, rooks or queens were left).
+    let white_knights = board.pieces[1];
+    let white_bishops = board.pieces[2];
+    let black_knights = board.pieces[7];
+    let black_bishops = board.pieces[8];
+    let minors = white_knights | white_bishops | black_knights | black_bishops;
+    match popcount(minors) {
+        // K vs K, or K+N/B vs K.
+        0 | 1 => true,
+        2 => {
+            // K+B vs K+B with both bishops on the same square colour is a
+            // dead draw. A knight, or two bishops of the same colour, can
+            // still mate.
+            if white_knights | black_knights != 0 {
+                return false;
             }
+            if popcount(white_bishops) != 1 || popcount(black_bishops) != 1 {
+                return false;
+            }
+            // Squares with (rank + file) even, the parity the old
+            // square-list code compared.
+            const EVEN_PARITY: u64 = 0xAA55_AA55_AA55_AA55;
+            let bishops = white_bishops | black_bishops;
+            bishops & EVEN_PARITY == 0 || bishops & !EVEN_PARITY == 0
         }
+        _ => false,
     }
-    false
 }
 
 /// Convenience: search a position synchronously (no threads, no info).
@@ -892,5 +906,26 @@ mod tests {
         let best = info.best_move.expect("root move");
         let legal = b.generate_legal_moves();
         assert!(legal.iter().any(|m| *m == best));
+    }
+
+    #[test]
+    fn insufficient_material_cases() {
+        let check = |fen: &str| is_insufficient_material(&Board::from_fen(fen).unwrap());
+        // Dead draws: K vs K, K+N vs K, K+B vs K.
+        assert!(check("8/8/8/4k3/8/8/8/4K3 w - - 0 1"));
+        assert!(check("8/8/8/4k3/8/8/8/3NK3 w - - 0 1"));
+        assert!(check("8/8/8/4k3/8/8/8/3BK3 w - - 0 1"));
+        // K+B vs K+B on the same square colour is a dead draw...
+        assert!(check("5b2/8/8/4k3/8/8/8/2B1K3 w - - 0 1"));
+        // ...but opposite-coloured bishops can still mate.
+        assert!(!check("6b1/8/8/4k3/8/8/8/2B1K3 w - - 0 1"));
+        // Two knights cannot force mate, but the position is not in the
+        // engine's dead-draw list.
+        assert!(!check("5n2/8/8/4k3/8/8/8/3NK3 w - - 0 1"));
+        // Two bishops on one side are not the K+B vs K+B draw.
+        assert!(!check("8/8/8/4k3/8/8/8/2B1K2B w - - 0 1"));
+        // Any pawn, rook or queen is sufficient material.
+        assert!(!check("8/8/8/4k3/8/8/4P3/4K3 w - - 0 1"));
+        assert!(!check("8/8/8/4k3/8/8/8/R3K3 w - - 0 1"));
     }
 }

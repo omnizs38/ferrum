@@ -171,7 +171,7 @@ pub fn bishop_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
 }
 
 pub fn queen_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
-    rook_attacks(sq, occupied) | bishop_attacks(sq, occupied)
+    crate::sliders::queen_attacks(sq, occupied)
 }
 
 /// Is `target` attacked by any piece of colour `attacker`?

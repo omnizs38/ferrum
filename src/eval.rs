@@ -190,8 +190,14 @@ fn pst_index(sq: u8, color: Color) -> usize {
 pub fn evaluate(board: &Board) -> i32 {
     #[cfg(feature = "advanced-eval")]
     {
-        let white = evaluate_color(board, Color::White);
-        let black = evaluate_color(board, Color::Black);
+        // The loose-material term needs both colours anyway (it scans every
+        // enemy N/B/R/Q), so compute it once for both sides: the attack
+        // tables for a square are shared instead of rebuilt per evaluation
+        // colour. `loose[owner]` = value of `owner`'s loose pieces, so the
+        // bonus for White comes from Black's loose material and vice versa.
+        let loose = loose_material_by_owner(board);
+        let white = evaluate_color(board, Color::White, loose[Color::Black.idx()]);
+        let black = evaluate_color(board, Color::Black, loose[Color::White.idx()]);
         let score = white - black;
         match board.side {
             Color::White => score,
@@ -268,7 +274,7 @@ fn taper(mg: i32, eg: i32, phase_units: i32) -> i32 {
 }
 
 #[cfg(feature = "advanced-eval")]
-fn evaluate_color(board: &Board, color: Color) -> i32 {
+fn evaluate_color(board: &Board, color: Color, enemy_loose_cp: i32) -> i32 {
     // Base material+PST is maintained incrementally by `Board` (see
     // `put_piece`/`remove_from`), so this is O(1) instead of a 32-piece
     // loop. Phase comes from popcounts (no square walk).
@@ -289,7 +295,7 @@ fn evaluate_color(board: &Board, color: Color) -> i32 {
     bonus += rook_files(board, color);
     bonus += king_safety(board, color);
     // Gamma "cunning" playstyle: hunting loose enemy material is good.
-    bonus += loose_material(board, color) * PRESSURE_CP / 100;
+    bonus += enemy_loose_cp * PRESSURE_CP / 100;
     if bishop_count >= 2 {
         bonus += 30; // bishop pair
     }
@@ -301,11 +307,13 @@ fn evaluate_color(board: &Board, color: Color) -> i32 {
 
 #[cfg(feature = "advanced-eval")]
 fn color_bitboard(board: &Board, color: Color) -> Bitboard {
-    let mut bb = 0u64;
-    for k in 0..6 {
-        bb |= board.pieces[color.idx() * 6 + k];
-    }
-    bb
+    let base = color.idx() * 6;
+    board.pieces[base]
+        | board.pieces[base + 1]
+        | board.pieces[base + 2]
+        | board.pieces[base + 3]
+        | board.pieces[base + 4]
+        | board.pieces[base + 5]
 }
 
 #[cfg(feature = "advanced-eval")]
@@ -334,9 +342,7 @@ fn mobility(board: &Board, color: Color, own: Bitboard) -> i32 {
     while b != 0 {
         let (sq, rest) = pop_lsb(b);
         b = rest;
-        // Queen attacks = rook + bishop attacks (same as queen_attacks);
-        // inlining the union avoids one extra sliding_attacks dispatch per queen.
-        mob += popcount((rook_attacks(sq, occ) | bishop_attacks(sq, occ)) & !own) as i32;
+        mob += popcount(queen_attacks(sq, occ) & !own) as i32;
     }
     // Include enemy pieces in mobility targets is fine (attacks count);
     // captures are tactics anyway. Small net effect either way.
@@ -500,69 +506,87 @@ fn shield_bonus(board: &Board, color: Color) -> i32 {
     shield * 8
 }
 
-/// Number of attacks on `sq` by `attacker` (every piece type), filtered to
-/// attackers whose value is at most `max_value`. Used by the playstyle
-/// term: a piece is only hanging if the attacker profits from the trade.
+/// Value of a loose piece, by kind (index matches `PieceType`), in
+/// centipawns. Pawns and kings are not part of the term.
 #[cfg(feature = "advanced-eval")]
-pub(crate) fn attackers_leq_count(board: &Board, sq: u8, attacker: Color, max_value: i32) -> i32 {
-    // Attacker values for the cheap-attacker gate: pawn=100, N=320,
-    // B=330, R=500. Queens are counted through the bishop/rook paths
-    // (a queen on a shared ray attacks diagonally and straight at once);
-    // the king only ever counts as an unbounded attacker (max_value ==
-    // i32::MAX), i.e. "is the square defended at all".
-    let base = attacker.idx() * 6;
+const LOOSE_VALUE: [i32; 6] = [0, 320, 330, 500, 900, 0];
+
+/// Loose material per *owner*: `loose[owner]` is the value of `owner`'s
+/// N/B/R/Q that the opponent attacks more often than the owner defends
+/// them, and that at least one cheap-enough attacker can profit from.
+/// Pins are not modelled — this is a static heuristic, not a full exchange
+/// evaluation.
+///
+/// One pass over the board serves both colours, so the attack tables for a
+/// square are built once rather than once per evaluation side. The scan
+/// also bails out early: most pieces are not attacked at all, and once the
+/// defenders match the attackers the rest need not be counted.
+#[cfg(feature = "advanced-eval")]
+fn loose_material_by_owner(board: &Board) -> [i32; 2] {
     let occ = board.occupied;
-    let mut n = 0i32;
-    // Pawns
-    if 100 <= max_value {
-        n += popcount(pawn_attackers_to(sq, attacker) & board.pieces[base]) as i32;
-    }
-    if 320 <= max_value {
-        n += popcount(knight_attacks(sq) & board.pieces[base + 1]) as i32;
-    }
-    if 330 <= max_value {
-        n += popcount(bishop_attacks(sq, occ) & (board.pieces[base + 2] | board.pieces[base + 4])) as i32;
-    }
-    if 500 <= max_value {
-        n += popcount(rook_attacks(sq, occ) & (board.pieces[base + 3] | board.pieces[base + 4])) as i32;
-    }
-    if max_value == i32::MAX {
-        n += popcount(king_attacks(sq) & board.pieces[base + 5]) as i32;
-    }
-    n
-}
-
-/// Number of attacks on `sq` by `attacker` (every piece type, unfiltered).
-#[cfg(feature = "advanced-eval")]
-pub(crate) fn attackers_count(board: &Board, sq: u8, attacker: Color) -> i32 {
-    attackers_leq_count(board, sq, attacker, i32::MAX)
-}
-
-/// Loose material of `attacker`'s opponent (N/B/R/Q whose attacker count
-/// exceeds its defences, and that at least one cheap-enough attacker can
-/// profit from), in centipawns. Pins are not modelled — this is a static
-/// heuristic, not a full exchange evaluation.
-#[cfg(feature = "advanced-eval")]
-fn loose_material(board: &Board, attacker: Color) -> i32 {
-    const LOOSE_VALUE: [i32; 6] = [0, 320, 330, 500, 900, 0];
-    let mut total = 0i32;
-    let enemy_base = attacker.other().idx() * 6;
-    for (k, value) in LOOSE_VALUE.iter().enumerate().take(5).skip(1) {
-        let mut bb = board.pieces[enemy_base + k];
-        while bb != 0 {
-            let (sq, rest) = pop_lsb(bb);
-            bb = rest;
-            let attackers = attackers_count(board, sq, attacker);
-            let defenders = attackers_count(board, sq, attacker.other());
-            if attackers > defenders {
-                let cheap = attackers_leq_count(board, sq, attacker, *value);
-                if defenders == 0 || cheap > 0 {
-                    total += *value;
+    let mut loose = [0i32; 2];
+    for (k, &value) in LOOSE_VALUE.iter().enumerate().skip(1).take(4) {
+        for owner in [Color::White, Color::Black] {
+            let attacker = owner.other();
+            let ab = attacker.idx() * 6;
+            let ob = owner.idx() * 6;
+            let mut bb = board.pieces[ob + k];
+            while bb != 0 {
+                let (sq, rest) = pop_lsb(bb);
+                bb = rest;
+                // Attacker's attacks on the target square, computed once
+                // and reused for the count and the cheap-attacker test.
+                let a_pawns = pawn_attackers_to(sq, attacker) & board.pieces[ab];
+                let a_knights = knight_attacks(sq) & board.pieces[ab + 1];
+                let a_diag = bishop_attacks(sq, occ) & (board.pieces[ab + 2] | board.pieces[ab + 4]);
+                let a_straight = rook_attacks(sq, occ) & (board.pieces[ab + 3] | board.pieces[ab + 4]);
+                let a_king = king_attacks(sq) & board.pieces[ab + 5];
+                let attackers = popcount(a_pawns | a_knights | a_diag | a_straight | a_king) as i32;
+                if attackers == 0 {
+                    continue;
+                }
+                // Count defenders, stopping as soon as they match the
+                // attackers (only "attacked more than defended" matters).
+                let mut defenders = popcount(pawn_attackers_to(sq, owner) & board.pieces[ob]) as i32;
+                if defenders < attackers {
+                    defenders += popcount(knight_attacks(sq) & board.pieces[ob + 1]) as i32;
+                }
+                if defenders < attackers {
+                    defenders += popcount(king_attacks(sq) & board.pieces[ob + 5]) as i32;
+                }
+                if defenders < attackers {
+                    defenders += popcount(bishop_attacks(sq, occ) & (board.pieces[ob + 2] | board.pieces[ob + 4])) as i32;
+                }
+                if defenders < attackers {
+                    defenders += popcount(rook_attacks(sq, occ) & (board.pieces[ob + 3] | board.pieces[ob + 4])) as i32;
+                }
+                if attackers <= defenders {
+                    continue;
+                }
+                // Only a piece the attacker can profitably take is loose:
+                // undefended, or attacked by something no more valuable.
+                let cheap = if defenders == 0 {
+                    1
+                } else {
+                    let mut c = popcount(a_pawns) as i32;
+                    if value >= 320 {
+                        c += popcount(a_knights) as i32;
+                    }
+                    if value >= 330 {
+                        c += popcount(a_diag) as i32;
+                    }
+                    if value >= 500 {
+                        c += popcount(a_straight) as i32;
+                    }
+                    c
+                };
+                if cheap > 0 {
+                    loose[owner.idx()] += value;
                 }
             }
         }
     }
-    total
+    loose
 }
 
 /// Playstyle knob: bonus inflicted (Alpha) / awarded (Gamma) per 100 CP of
@@ -608,30 +632,33 @@ mod tests {
         assert_eq!(a, c);
     }
 
-    // The loose-material helpers are Gamma-only (advanced eval), so this
+    // The loose-material scan is Gamma-only (advanced eval), so this
     // test only exists in the Gamma build.
     #[cfg(feature = "advanced-eval")]
     #[test]
-    fn attackers_count_and_loose_material_work() {
+    fn loose_material_scan_works() {
+        let loose = |b: &Board, c: Color| loose_material_by_owner(b)[c.idx()];
         // A black rook on e8 (down the file) and one on a4 (along the rank).
         // Both attack the white knight on e4; nothing defends it, so the
         // knight is loose.
         let b = Board::from_fen("4r3/8/8/8/r3N3/8/8/K7 b - - 0 1").unwrap();
-        assert_eq!(attackers_count(&b, 28, Color::Black), 2);
-        assert_eq!(attackers_count(&b, 28, Color::White), 0);
-        assert_eq!(loose_material(&b, Color::Black), 320); // hanging even to rooks
-        assert_eq!(loose_material(&b, Color::White), 0);
+        assert_eq!(loose(&b, Color::White), 320); // hanging even to rooks
+        assert_eq!(loose(&b, Color::Black), 0);
         // A white pawn on d3 defends the knight: two attackers against one
         // defender is NOT a free win, and the cheap attackers outside the
         // trade are rooks (value 500 > 320) — so not loose.
         let b2 = Board::from_fen("4r3/8/8/8/r3N3/3P4/8/K7 b - - 0 1").unwrap();
-        assert_eq!(attackers_count(&b2, 28, Color::White), 1);
-        assert_eq!(loose_material(&b2, Color::Black), 0);
+        assert_eq!(loose(&b2, Color::White), 0);
         // Two black knights (c5 and f6) attacking the knight, one white pawn
         // defending: cheap attackers (320 ≤ 320) outnumber the defender — loose.
         let b3 = Board::from_fen("8/8/5n2/2n5/4N3/3P4/8/K7 b - - 0 1").unwrap();
-        assert_eq!(attackers_count(&b3, 28, Color::Black), 2);
-        assert_eq!(loose_material(&b3, Color::Black), 320);
+        assert_eq!(loose(&b3, Color::White), 320);
+        // The mirrored position tells the same story for Black: rooks on
+        // a5/e1 attack the black knight on e5, the d6 pawn defends it, and
+        // the rooks are too valuable to be cheap attackers — not loose.
+        let b4 = Board::from_fen("k7/8/3p4/R7/8/8/8/4R2K w - - 0 1").unwrap();
+        assert_eq!(loose(&b4, Color::Black), 0);
+        assert_eq!(loose(&b4, Color::White), 0);
     }
 
     #[cfg(feature = "advanced-eval")]

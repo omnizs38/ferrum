@@ -157,45 +157,74 @@ pub fn square_to_str(sq: u8) -> String {
     s
 }
 
-/// A list of generated moves (fixed capacity, no allocation).
-/// Backed by a stack array so `generate_moves` costs no heap allocation.
+/// Maximum length of a move list: no legal chess position has more
+/// moves, and the buffers are fixed-size so move generation never
+/// allocates.
 pub const MAX_MOVES: usize = 256;
 
-// Pre-fill constant for fixed-size move arrays (a const, so the array
-// initialisation is a straight copy of a constant, not work per element).
-const EMPTY_MOVE: Move = Move::new(0, 0, None);
-
-#[derive(Clone, Debug)]
+/// A list of generated moves (fixed capacity, no allocation).
+///
+/// The backing array is deliberately *not* initialised: a move list is
+/// built once per search node, and zeroing 256 slots (2 KiB) there costs
+/// more than the move generation itself. Only the first `len` slots are
+/// ever read, and `push` initialises a slot before it becomes live.
 pub struct MoveList {
-    pub moves: [Move; MAX_MOVES],
-    pub len: usize,
+    moves: [std::mem::MaybeUninit<Move>; MAX_MOVES],
+    len: usize,
 }
 
 impl MoveList {
+    #[inline]
     pub fn new() -> MoveList {
-        MoveList { moves: [EMPTY_MOVE; MAX_MOVES], len: 0 }
+        MoveList { moves: [std::mem::MaybeUninit::uninit(); MAX_MOVES], len: 0 }
     }
+    #[inline]
     pub fn push(&mut self, m: Move) {
         if self.len < MAX_MOVES {
-            self.moves[self.len] = m;
+            self.moves[self.len].write(m);
             self.len += 1;
         }
     }
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    #[inline]
     pub fn iter(&self) -> std::slice::Iter<'_, Move> {
-        self.moves[..self.len].iter()
+        self.as_slice().iter()
     }
     /// Live moves as a slice, for indexing outside `len`/`iter`.
+    ///
+    /// SAFETY: `moves[..len]` was initialised by `push`; `MaybeUninit<T>`
+    /// has the same layout as `T`, so the pointer/length pair is a valid
+    /// `[Move]` and the borrow rules prevent aliasing.
+    #[inline]
     pub fn as_slice(&self) -> &[Move] {
-        &self.moves[..self.len]
+        unsafe { std::slice::from_raw_parts(self.moves.as_ptr().cast::<Move>(), self.len) }
     }
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [Move] {
-        &mut self.moves[..self.len]
+        unsafe { std::slice::from_raw_parts_mut(self.moves.as_mut_ptr().cast::<Move>(), self.len) }
+    }
+}
+
+impl Clone for MoveList {
+    fn clone(&self) -> MoveList {
+        let mut out = MoveList::new();
+        for m in self.iter() {
+            out.push(*m);
+        }
+        out
+    }
+}
+
+impl std::fmt::Debug for MoveList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -208,6 +237,6 @@ impl Default for MoveList {
 impl std::ops::Index<usize> for MoveList {
     type Output = Move;
     fn index(&self, i: usize) -> &Move {
-        &self.moves[i]
+        &self.as_slice()[i]
     }
 }

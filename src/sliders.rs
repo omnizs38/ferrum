@@ -37,10 +37,12 @@ struct SliderTables {
     // Heap-allocated (Vec) so the 4 MiB of tables never touches the stack.
     bishop_attacks: Vec<Bitboard>,
     rook_attacks: Vec<Bitboard>,
+    /// Whether BMI2's PEXT is available; detected once at table build time
+    /// so every attack lookup does not pay for a feature check.
+    use_pext: bool,
 }
 
 static TABLES: OnceLock<SliderTables> = OnceLock::new();
-static HAS_PEXT: OnceLock<bool> = OnceLock::new();
 
 /// Inner-ray occupancy mask for `sq` in `dirs` (outer board-edge end of
 /// each ray excluded).
@@ -91,15 +93,14 @@ fn raywalk_attacks(sq: u8, occupied: Bitboard, dirs: &[usize]) -> Bitboard {
 /// Compact the occupied `mask` bits to a low contiguous index.
 /// Uses BMI2 PEXT on x86-64 when available; a portable loop otherwise.
 #[inline]
-fn unpack_index(occupied: Bitboard, mask: Bitboard) -> usize {
+fn unpack_index(occupied: Bitboard, mask: Bitboard, use_pext: bool) -> usize {
     #[cfg(target_arch = "x86_64")]
-    {
-        if *HAS_PEXT.get_or_init(|| std::is_x86_feature_detected!("bmi2")) {
-            // SAFETY: PEXT is a documented BMI2 instruction; used only when
-            // runtime-detected as supported.
-            return unsafe { std::arch::x86_64::_pext_u64(occupied, mask) } as usize;
-        }
+    if use_pext {
+        // SAFETY: PEXT is a documented BMI2 instruction; `use_pext` is set
+        // only when it was runtime-detected as supported.
+        return unsafe { std::arch::x86_64::_pext_u64(occupied, mask) } as usize;
     }
+    let _ = use_pext;
     let mut out = 0u64;
     let mut m = mask;
     let mut i = 0u32;
@@ -120,6 +121,10 @@ fn build_tables() -> SliderTables {
         rook_mask: [0; 64],
         bishop_attacks: vec![0; 64 * 4096],
         rook_attacks: vec![0; 64 * 4096],
+        #[cfg(target_arch = "x86_64")]
+        use_pext: std::is_x86_feature_detected!("bmi2"),
+        #[cfg(not(target_arch = "x86_64"))]
+        use_pext: false,
     };
     for sq in 0..64u8 {
         let bmask = relevant_rays(sq, &BISHOP_DIRS);
@@ -162,22 +167,29 @@ fn tables() -> &'static SliderTables {
 }
 
 /// Bishop attacks from `sq` given the blockers in `occupied`.
+#[inline]
 pub fn bishop_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
     let t = tables();
-    let idx = unpack_index(occupied, t.bishop_mask[sq as usize]);
+    let idx = unpack_index(occupied, t.bishop_mask[sq as usize], t.use_pext);
     t.bishop_attacks[(sq as usize) * 4096 + idx]
 }
 
 /// Rook attacks from `sq` given the blockers in `occupied`.
+#[inline]
 pub fn rook_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
     let t = tables();
-    let idx = unpack_index(occupied, t.rook_mask[sq as usize]);
+    let idx = unpack_index(occupied, t.rook_mask[sq as usize], t.use_pext);
     t.rook_attacks[(sq as usize) * 4096 + idx]
 }
 
-/// Queen attacks = rook + bishop.
+/// Queen attacks = rook + bishop, from a single table lookup pair.
+#[inline]
 pub fn queen_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
-    rook_attacks(sq, occupied) | bishop_attacks(sq, occupied)
+    let t = tables();
+    let base = (sq as usize) * 4096;
+    let r_idx = unpack_index(occupied, t.rook_mask[sq as usize], t.use_pext);
+    let b_idx = unpack_index(occupied, t.bishop_mask[sq as usize], t.use_pext);
+    t.rook_attacks[base + r_idx] | t.bishop_attacks[base + b_idx]
 }
 
 #[cfg(test)]

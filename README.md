@@ -1,4 +1,12 @@
-# Ferrum — a clean, from-scratch chess engine in Rust
+<p align="center">
+  <img src="docs/logo-gamma.webp" alt="Ferrum Gamma logo — an iron ingot stamped with γ" width="340">
+  &nbsp;&nbsp;
+  <img src="docs/logo-alpha.webp" alt="Ferrum Alpha logo — an iron ingot stamped with α" width="340">
+</p>
+
+<p align="center"><sub><b>Ferrum Gamma</b> &nbsp;·&nbsp; <b>Ferrum Alpha</b></sub></p>
+
+<h1 align="center">Ferrum — a clean, from-scratch chess engine in Rust</h1>
 
 Ferrum is a UCI-compatible chess engine written from scratch in Rust. It
 contains no forks and no code borrowed from Stockfish — every line is
@@ -13,19 +21,24 @@ first comes the common core, then the differences.
 
 | Variant | Build | Threads | Hash (default) |  Quiescence | Evaluation | Design target |
 |---|---|---|---|---|---|---|
-| **Ferrum Gamma** (standard) | `cargo build --release` (default) | Lazy SMP, `Threads` 1–8 | 64 MB, `Hash` 1–4096 | Yes (`qsearch`) + null-move, LMR | Advanced: tapered MG/EG, mobility, pawn structure, bishop pair, rook files, king safety | ~2000–2400 Elo |
-| **Ferrum Alpha** (lightweight) | `cargo build --release --no-default-features` | Single-threaded (`Threads` max 1) | 8 MB | No (static eval at horizon; no null-move/LMR) | Simple: material + single PST | ~1200–1500 Elo |
+| **Ferrum Gamma** (standard) | `cargo build --release` (default) | Lazy SMP, `Threads` 1–8 | 64 MB, `Hash` 1–4096 | Yes (`qsearch`) + null-move, LMR, RFP, LMP, futility, razoring | Advanced: tapered MG/EG, mobility, pawn structure, bishop pair, rook files, king safety, trapping terms | ~1900–2000 measured at 300 ms; long-term goal 3500 |
+| **Ferrum Alpha** (lightweight) | `cargo build --release --no-default-features` | Single-threaded (`Threads` max 1) | 8 MB | Yes (`qsearch`) + RFP, LMP, futility (no null-move/LMR/razoring) | Simple: material + single PST + defensive king terms | ~1850–1900 measured at 300 ms; goal 2000 |
 
 The name *Alpha* refers to the level, not the stage of development: it is a
-fully-fledged lightweight engine, not a test build. Overtaking Stockfish is
-not a goal — that is unrealistic for a solo project. The Elo ranges above
-are **design targets** for the feature sets (depth + eval + threads +
-hash) on typical hardware; your measured Elo depends on time controls, hash
-size and CPU.
+fully-fledged lightweight engine, not a test build. Both variants now share
+the trained search core (quiescence, reverse futility, late-move pruning,
+depth-1 futility) and differ in evaluation, threading and TT size; Gamma
+adds null-move, LMR, razoring and check extensions. Overtaking Stockfish is
+not a goal — that is unrealistic for a solo project. The targets above are
+**design goals** for the feature sets on typical hardware; your measured Elo
+depends on time controls, hash size and CPU.
 
 ```toml
 [features]
 default = ["gamma"]
+# `qsearch` now means "Gamma's extra aggressive search set": null-move,
+# LMR, razoring, check extensions. Quiescence itself is shared core and is
+# also on in Alpha.
 gamma   = ["threads", "qsearch", "advanced-eval", "large-tt"]
 threads = []
 qsearch = []
@@ -70,6 +83,12 @@ Debug helpers (not part of the UCI spec): `d`, `eval`, `perft <n>`,
 cargo run --release --example bench    # startpos depth 4/6/7/8: nodes, PV
 cargo run --release --example tactics  # mate-in-1/2, win-of-queen, center
 cargo run --release --no-default-features --example bench
+
+# In-process paired training match (200 games, same opening for both colours)
+cargo run --release --example train -- \
+  --a "pressure_scale=16,trap_bonus=8" --b default --games 200 --nodes 20000
+# Or drive a full training run (builds the right variant itself):
+python tools/train.py --variant gamma --mode spsa --iters 24 --games 200
 ```
 
 ## Design overview
@@ -88,18 +107,23 @@ src/
               PSTs are White-oriented, rank-8-first tables with a documented
               mirror rule. Advanced adds mobility, doubled/isolated/passed
               pawns, bishop pair, rook open/semi files, king-safety, and the
-              Gamma playstyle term (hunting loose material); the simple eval
-              adds Alpha's king-shield term.
+              Gamma playstyle terms (loose-material hunting, trapped pieces,
+              enemy-king pressure); the simple eval adds Alpha's king-shield,
+              own-loose and tempo terms. Every positional weight lives in
+              `EvalParams`, which the training harness can override without
+              a rebuild (`setoption name EvalParams value ...`).
   tt.rs       Power-of-two transposition table (hash/depth/flag/score/best/
               age), shared behind a mutex for SMP.
   search.rs   Negamax alpha-beta + PVS, iterative deepening, aspiration
               (re-centered windows — see the comment on the edge case),
               TT, MVV-LVA + killers + history, check extension, razoring,
               repetition / 50-move / insufficient-material draws, mate
-              scored as MATE - ply. Gamma adds null-move pruning,
-              late-move reduction, qsearch (stand-pat, delta pruning, check
-              evasions) and Lazy SMP; Alpha searches every move in full
-              with static eval at the horizon.
+              scored as MATE - ply. Both variants add quiescence
+              (stand-pat, delta pruning, SEE pruning, check evasions),
+              late-move pruning, reverse futility and depth-1 futility;
+              Gamma additionally has null-move pruning, late-move
+              reduction and check extensions. `SearchParams` exposes each
+              pruning for training A/Bs.
   uci.rs      UCI loop: uci/isready/setoption/position/go + in-engine time
               management (go wtime/btime/winc/binc/movestogo/movetime/
               depth/nodes/infinite). Search runs on a background thread so
@@ -128,12 +152,17 @@ Representation notes:
 The two variants deliberately differ in *bias*, not just depth:
 
 * **Gamma** hunts loose material — the advanced eval adds a bonus for
-  enemy pieces that are attacked more than they are defended.
-* **Alpha** values king shelter — the simple eval adds a bonus for pawns
-  shielding the king.
+  enemy pieces that are attacked more than they are defended, a bonus for
+  enemy pieces with no escape squares (trapped), and a bonus for pressing
+  the enemy king ring.
+* **Alpha** values king shelter and its own material — the simple eval adds
+  a king pawn-shield bonus and an own-loose-material penalty (it will not
+  leave pieces hanging), plus a tempo term.
 
 Both are measured A/B changes, not aspirations; `docs/variant-styles.md`
 has the anatomy, the numbers and the rejected alternatives.
+`docs/training.md` and `tools/train.py` describe how the weights are
+trained (in-process paired games, then SPSA / targeted style search).
 
 ## Tools
 
@@ -143,6 +172,7 @@ need NumPy):
 | Tool | Purpose |
 |---|---|
 | `gauntlet.py` | UCI match harness — plays paired games against another engine or a Stockfish anchor, writes `results/*.json` |
+| `train.py` | Training driver — builds `examples/train` for a variant, runs SPSA over `EvalParams`, then a targeted style search; writes `training/*.json` |
 | `verify_mates.py` | Re-checks mate claims with Ferrum itself (`perft 1 == 0` + mate score) |
 | `session_summary.py` | Tabulates every gauntlet JSON in `results/` into one session table |
 | `probe_fen.py` | Asks an engine for its best move on a FEN (`go depth N`) |
@@ -160,9 +190,15 @@ need NumPy):
   position 5 `44/1486/62379/2103487` — all asserted in `board::tests`.
 * Search: mate-in-one (`Qxf7#`), win-of-queen (`Nxa8`), stop-flag handling,
   legal root move — in `search::tests` and `examples/tactics.rs`.
+* Evaluation: parameter-spec round-trip and unknown-key rejection, the
+  loose-material scan, the trapped-piece term, and that trained weights
+  actually move the evaluation (`eval::tests`).
+* Training harness: `examples/train.rs` compiles and runs for both variants
+  (it is an example, not a test); its output is the paired-game evidence in
+  `ELO.md`.
 * UCI end-to-end (handshake, `go depth`, mate-in-one, clock + `stop`,
-  `Threads`/`Hash` options, `ucinewgame` full reset) — `tests/uci_smoke.rs`
-  spawns the real binary via `CARGO_BIN_EXE_ferrum`.
+  `Threads`/`Hash`/`EvalParams` options, `ucinewgame` full reset) —
+  `tests/uci_smoke.rs` spawns the real binary via `CARGO_BIN_EXE_ferrum`.
 * Protocol rule: while a search is running, `stop` stops it and `position` /
   `ucinewgame` stop-and-join it (printing its `bestmove`, possibly
   `bestmove (none)`) before the board/TT reset — a stale bestmove is never
@@ -171,16 +207,18 @@ need NumPy):
 ## Notes on Elo
 
 See `ELO.md` for the gauntlet method and measured estimates
-(`tools/gauntlet.py` vs Stockfish `UCI_Elo` anchors). In short: Gamma
-targets 2000–2400 and Alpha 1200–1500; earlier calibration put Gamma at
-bottom-of-target and Alpha above target (see `ELO.md` for the current
-numbers after the latest strength/scaling work). Estimates move
-with TC, Hash and Threads — always use the `--release` build, and prefer
-more games / longer controls over single short matches. At
-`go movetime 1` Ferrum measures ≈ 1470–1500 vs Stockfish anchors (see
-`ELO.md`); the 2000 target is a ≥300 ms target, not a 1 ms one. Hitting 2200+
-would require more strength work (deeper search, better eval) rather
-than better testing.
+(`tools/gauntlet.py` vs Stockfish `UCI_Elo` anchors). In short: the
+2026-11-15 training run moved Gamma to ~1930 versus the SF 2000 anchor at
+300 ms (4–6 in 10 games) and Alpha to ~1870 versus the SF 1800 anchor
+(5–3–2 in 10 games), with Alpha gaining ~214 Elo in-process at a fixed
+50 ms clock and Gamma ~73 Elo at 80k nodes/move. The variants' long-term
+goals are 2000 for Alpha and 3500 for Gamma; neither is reached yet.
+Estimates move with TC, Hash and Threads — always use the `--release`
+build, and prefer more games / longer controls over single short matches.
+At `go movetime 1` Ferrum still measures ≈ 1470–1500 vs Stockfish anchors
+(see `ELO.md`); the 2000 target is a ≥300 ms target, not a 1 ms one.
+Hitting 2200+ would require more strength work (deeper search, better
+eval) rather than better testing.
 
 ## License
 

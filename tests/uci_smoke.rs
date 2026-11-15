@@ -89,6 +89,18 @@ fn uci_handshake_and_search() {
     let mv = best.split_whitespace().nth(1).unwrap_or("");
     assert!(mv.len() == 4 || mv.len() == 5, "unexpected threads bestmove '{mv}'");
 
+    // Training hook: the EvalParams option changes the static evaluation
+    // (startpos is symmetric, so the score is exactly the tempo bonus).
+    send("position startpos");
+    send("setoption name EvalParams value tempo=100");
+    send("eval");
+    let e = recv_until("eval ");
+    assert_eq!(e.trim(), "eval 100", "EvalParams tempo=100 not applied: {e}");
+    send("setoption name EvalParams value default");
+    send("eval");
+    let e = recv_until("eval ");
+    assert_eq!(e.trim(), "eval 15", "EvalParams reset not applied: {e}");
+
     // ucinewgame must fully reset state: the board returns to the start
     // position and the next search is a legal, ordinary search of it.
     send("position fen rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 2");

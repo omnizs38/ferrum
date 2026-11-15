@@ -319,6 +319,87 @@ project, not a session.
 Raw JSON (git-ignored): `results/gauntlet_razor_vs_base_50ms.json`,
 `results/gauntlet_texeltables_vs_base_100ms.json`.
 
+### 2026-11-15 session — training run: shared search core, defensive Alpha, trapping Gamma
+
+Objective: make both engines stronger and *start training* them toward the
+requested styles — Alpha defensive (long-term goal 2000), Gamma trapping
+(long-term goal 3500). What was built and measured:
+
+1. **Trainable engine surface.** All positional weights are now
+   `eval::EvalParams` (28 knobs) and the prunings are
+   `search::SearchParams` (8 knobs). `examples/train.rs` plays A-vs-B games
+   entirely in-process (paired openings, colours swapped, fixed node budget
+   or clock, style metrics), and `tools/train.py` drives SPSA over the
+   weights plus a targeted style search. The engine also accepts a weight
+   spec over UCI: `setoption name EvalParams value "pressure_scale=16,..."`
+   (empty / `default` = baseline).
+2. **Search, both variants.** Shared: quiescence (stand-pat, delta, SEE,
+   evasions), late-move pruning (`i >= 4 + depth²`, depth ≤ 4), reverse
+   futility (120·depth, depth ≤ 6) and depth-1 futility (100). Gamma keeps
+   null-move, LMR, razoring and check extensions.
+3. **Evaluation, per variant.** Alpha: own-loose-material penalty 24% +
+   tempo 15. Gamma: `pressure_scale` 8→16, new trapped-piece bonus 8, new
+   enemy-king-pressure bonus 3, tempo 15.
+
+In-process paired measurements (the trainer, not the UCI gauntlet):
+
+| Match | Games | TC | Score (A–B) | Elo (95% CI) | Style |
+|---|---|---|---|---|---|
+| Gamma: prunings vs all-off | 600 | 20k nodes/move | 351–92–157 | **+160** [+131,+193] | — |
+| Gamma: prunings vs all-off | 400 | 80k nodes/move | 150–63–187 | **+77** [+43,+113] | — |
+| Gamma: trapping trio vs base | 600 | 20k nodes/move | 231–160–209 | **+41** [+14,+70] | enemy loose 45.5 vs 37.2 cp; enemy trapped 0.31 vs 0.24; king pressure 5.17 vs 4.52 |
+| Gamma: trapping trio vs base | 400 | 80k nodes/move | 95–78–227 | +15 [−19,+49] | same direction |
+| Gamma: full package vs old settings | 800 | 20k nodes/move | 464–132–204 | **+153** [+128,+181] | enemy loose 46.8 vs 42.0 |
+| Gamma: full package vs old settings | 400 | 80k nodes/move | 149–66–185 | **+73** [+39,+109] | enemy loose 44.9 vs 37.7 |
+| Alpha: own-loose 24 + tempo vs base | 400 | 80k nodes/move | 195–141–64 | **+47** [+13,+82] | own loose 40.5 vs 57.2 cp |
+| Alpha: prunings vs all-off | 200 | 50 ms | 126–40–34 | **+160** [+109,+217] | — |
+| Alpha: + qsearch vs pruning-only | 200 | 50 ms | 105–50–45 | **+98** [+50,+151] | — |
+| Alpha: qsearch alone vs no qsearch | 160 | 50 ms | 19–121–20 | **−262** [−344,−199] | — |
+| Alpha: full package vs old settings | 400 | 50 ms | 287–68–45 | **+214** [+175,+257] | own loose 39.3 vs 72.9 cp |
+
+Scalar/parameter details behind the rows:
+
+* Reverse futility alone measured +22 [−6,+50] over 600 games; LMP alone
+  +128 [+99,+158]; adding futility and RFP on top gave +160, so the set is
+  kept together.
+* `alpha_own_loose` was swept in 600-game steps: 8 ≈ 16 ≈ 24 (24 beat 16
+  by +41 [+11,+72] in a direct 500-game match; 32 lost to 24 by −19
+  [−50,+11]). 24 is the trained value.
+* qsearch without the prunings is a *loss* for Alpha at a fixed clock
+  (it buys tactics but loses depth); with the prunings paying for it,
+  qsearch is a clear gain. Both were trained and adopted together.
+* `pressure_scale` 24 vs 16 measured +17 [−13,+48]; 16 was kept as the
+  moderate choice.
+
+UCI gauntlets (fresh binaries, real subprocesses):
+
+| Match | Games | TC | Result | Elo |
+|---|---|---|---|---|
+| Gamma trained vs Gamma (old binary) | 40 | 50 ms | 9–8–23 | +9 [−102,+121] |
+| Alpha trained vs Alpha (old binary) | 40 | 50 ms | 26–10–4 | **+147** [+40,+291] |
+| Gamma trained vs SF 2000 | 10 | 300 ms, T4 | 4–6–0 | −70 [−389,+150] → **≈1930** |
+| Alpha trained vs SF 1800 | 10 | 300 ms, T1 | 5–3–2 | +70 [−150,+389] → **≈1870** |
+
+The Gamma-vs-old 50 ms result is consistent with noise: at 50 ms both
+builds produce long drawn games against each other (23/40 draws), and the
+in-process numbers at 20k/80k nodes are the statistically useful ones. The
+absolute anchors are 10-game samples with very wide intervals; they place
+both variants near 1900 at 300 ms, not at their long-term goals.
+
+**Bench:** Gamma startpos d8 **51621 → 15577 nodes** (−70%) after the
+prunings; Alpha d8 273959 nodes (the old Alpha had no pruning or
+quiescence, so its node count is not comparable). Tactics suite green for
+both variants; full test suites green (debug + release, both variants);
+`cargo clippy --all-targets -D warnings` clean for both.
+
+**Honest reading:** the training run is a clear strength gain at short and
+medium TC and a clear style gain, but it does **not** reach 2000 for Alpha
+or anything near 3500 for Gamma. The remaining gap is the same one ELO.md
+has documented all along: eval quality (NNUE/distillation), raw node
+throughput (magic-style movegen, legal movegen) and large-scale SPSA over
+tens of thousands of games. This session built the harness those next steps
+need.
+
 ## Alpha (lightweight, `--no-default-features`)
 
 | Match (fixed `movetime`) | Score (Ferrum–SF) | Est. Elo | 95% CI |
@@ -337,11 +418,13 @@ ladder is noisy: Gamma Threads 4 5–5–0 (gap 0, ±252) and Threads 1
 +150–450 given ±250 CIs, and with the SF-anchored gap
 (~1965 − ~1520 ≈ +445).
 
-**Reading:** Alpha was **~1540–1640** (above target) before scaling;
-after gating null-move/LMR to Gamma it measures **~1508–1530** —
-at the **top edge of its 1200–1500 design target**, not comfortably
-inside. The Gamma–Alpha gap from SF anchors is ~+440, in line with
-the 50 ms ladder.
+**Reading:** Alpha was **~1540–1640** (above its old 1200–1500 target)
+before the 2026-11-15 training run. After the shared pruning core, quiescence
+and the defensive eval, it measures **≈1870** at 300 ms (5–3–2 vs SF 1800,
+10 games) and **+214 Elo** over its old self at a fixed 50 ms clock. The
+Gamma–Alpha gap has narrowed from ~+440 to roughly +60 at 300 ms, which is
+also why the single shared search core matters more than the variant
+labels: the remaining differences are eval, threading and TT size.
 
 ## How to reproduce
 
@@ -358,3 +441,27 @@ python tools/gauntlet.py --white target/release/ferrum-gamma.exe --black stockfi
 
 Raw game lists (JSON) are written to `results/` (git-ignored). Re-run with
 more games / longer TC to tighten the intervals before quoting a rating.
+
+### Reproducing the 2026-11-15 training measurements
+
+```powershell
+# In-process paired games (the statistically useful numbers)
+cargo build --release --example train
+.\target\release\examples\train.exe --a default `
+  --b "pressure_scale=8,trap_bonus=0,king_pressure=0,tempo=0" `
+  --sb "rfp_margin=0,futility_margin=0,lmp_base=0" `
+  --games 800 --nodes 20000 --seed 71 --parallel 10
+
+cargo build --release --no-default-features --example train
+.\target\release\examples\train.exe --a default `
+  --b "alpha_own_loose=0,tempo=0" `
+  --sb "rfp_margin=0,futility_margin=0,lmp_base=0,qsearch=0" `
+  --games 400 --movetime 50 --seed 73 --parallel 8
+
+# Full training loop (SPSA + style search) is documented in docs/training.md
+python tools/train.py --variant gamma --mode spsa --iters 24 --games 200
+```
+
+Note that `ferrum.exe` is the *last-built* variant. Build Gamma last if you
+want `target/release/ferrum.exe` to be Gamma, as the README's quick start
+assumes.

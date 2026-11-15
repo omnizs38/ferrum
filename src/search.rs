@@ -1,24 +1,29 @@
 //! Search: negamax alpha-beta with iterative deepening.
 //!
-//! The Gamma build adds quiescence search (feature `qsearch`), null-move
-//! pruning, late-move reduction, advanced evaluation and optional
-//! multithreading (feature `threads`); Alpha builds skip all of those and
-//! evaluate directly at the horizon. What remains shared — transposition
-//! table, move ordering, killers/history and check extension — is the
+//! Quiescence search is part of the **shared core** now: both variants
+//! resolve captures at the horizon (Alpha's tactical blind spot was the
+//! single largest gap to its rating target). The Gamma build adds the extra
+//! aggressive set — null-move pruning, late-move reduction, razoring and
+//! check extensions — behind the `qsearch` feature, plus advanced evaluation
+//! and optional multithreading (`threads`). What remains shared —
+//! transposition table, move ordering, killers/history, delta/SEE pruning,
+//! reverse futility, late-move pruning, futility and qsearch itself — is the
 //! common core, because Alpha *is* Gamma with features removed.
+//!
+//! Every `evaluate` call goes through `evaluate_with(&self.params)` so the
+//! training harness (`examples/train.rs`) can search with trained weights.
 //!
 //! Scores are centipawns from the side-to-move's perspective.
 //! `MATE` = 32000; mate in `n` is `MATE - n`.
 
+use crate::bitboard::{
+    bishop_attacks, bit, king_attacks, knight_attacks, pawn_attackers_to, pop_lsb, popcount,
+    rook_attacks,
+};
 use crate::board::Board;
-#[cfg(feature = "qsearch")]
-use crate::bitboard::{bishop_attacks, bit, king_attacks, knight_attacks, pawn_attackers_to, pop_lsb, rook_attacks};
-use crate::bitboard::popcount;
-use crate::eval::evaluate;
+use crate::eval::{evaluate_with, EvalParams};
 use crate::tt::{Bound, TranspositionTable};
-#[cfg(feature = "qsearch")]
-use crate::types::Color;
-use crate::types::{Move, PieceType};
+use crate::types::{Color, Move, PieceType};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -41,6 +46,125 @@ impl SearchLimits {
     }
 }
 
+/// Trainable search prunings. `DEFAULT` is the trained baseline; a match of
+/// "default" vs a candidate isolates the change being tested. The trainer
+/// passes these as `key=value,...` specs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchParams {
+    /// Reverse futility: at depth <= `rfp_max_depth`, a non-PV node whose
+    /// static eval beats beta by `rfp_margin * depth` is cut immediately.
+    /// 0 = off.
+    pub rfp_margin: i32,
+    pub rfp_max_depth: i32,
+    /// Futility: at depth 1, skip quiet moves when `eval + margin <= alpha`.
+    /// 0 = off.
+    pub futility_margin: i32,
+    /// Late-move pruning: at depth <= `lmp_max_depth`, skip quiet moves at
+    /// index >= `lmp_base + depth*depth`. 0 = off.
+    pub lmp_base: i32,
+    pub lmp_max_depth: i32,
+    /// LMR divisor: 0 keeps the fixed one-ply reduction; a positive value
+    /// enables the log formula `0.75 + ln(depth)*ln(index)/divisor`.
+    pub lmr_div: i32,
+    /// 1 = resolve captures at the horizon with quiescence; 0 = static eval
+    /// (the pre-training Alpha behaviour). Exposed so training can A/B the
+    /// depth-vs-tactics trade-off at a fixed clock.
+    pub qsearch: i32,
+    /// Maximum capture plies inside quiescence (0 = unlimited). A low cap
+    /// keeps qsearch cheap on engines without null-move/LMR pruning.
+    pub qs_max_plies: i32,
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        SearchParams::DEFAULT
+    }
+}
+
+impl SearchParams {
+    /// Trained baseline (2026-11-15): late-move pruning, reverse futility
+    /// and depth-1 futility, plus a resolved horizon (quiescence).
+    ///
+    /// Gamma: +160 Elo (CI +131..+193) at 20k nodes/move over 600 paired
+    /// games vs all-off, and +77 Elo (CI +43..+113) at 80k nodes/move over
+    /// 400 games.
+    ///
+    /// Alpha: +160 Elo at a fixed 50 ms clock over 200 games vs all-off, and
+    /// qsearch adds another +98 Elo (CI +50..+151) once the prunings pay for
+    /// its depth cost. Without the prunings, qsearch alone measured -262 Elo
+    /// (it cost more depth than the tactics were worth), which is why the
+    /// two are trained and kept together.
+    pub const DEFAULT: SearchParams = SearchParams {
+        rfp_margin: 120,
+        rfp_max_depth: 6,
+        futility_margin: 100,
+        lmp_base: 4,
+        lmp_max_depth: 4,
+        lmr_div: 0,
+        qsearch: 1,
+        qs_max_plies: 0,
+    };
+
+    pub const KEYS: [&'static str; 8] = [
+        "rfp_margin",
+        "rfp_max_depth",
+        "futility_margin",
+        "lmp_base",
+        "lmp_max_depth",
+        "lmr_div",
+        "qsearch",
+        "qs_max_plies",
+    ];
+
+    pub fn set(&mut self, key: &str, value: i32) -> Result<(), String> {
+        match key {
+            "rfp_margin" => self.rfp_margin = value,
+            "rfp_max_depth" => self.rfp_max_depth = value,
+            "futility_margin" => self.futility_margin = value,
+            "lmp_base" => self.lmp_base = value,
+            "lmp_max_depth" => self.lmp_max_depth = value,
+            "lmr_div" => self.lmr_div = value,
+            "qsearch" => self.qsearch = value,
+            "qs_max_plies" => self.qs_max_plies = value,
+            other => return Err(format!("unknown search parameter '{other}'")),
+        }
+        Ok(())
+    }
+
+    pub fn from_spec(spec: &str) -> Result<SearchParams, String> {
+        let mut p = SearchParams::DEFAULT;
+        for part in spec.split([',', ';']) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (k, v) = part
+                .split_once('=')
+                .ok_or_else(|| format!("expected key=value, got '{part}'"))?;
+            let v: i32 = v
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad integer '{}' for '{}'", v.trim(), k.trim()))?;
+            p.set(k.trim(), v)?;
+        }
+        Ok(p)
+    }
+
+    pub fn to_spec(&self) -> String {
+        format!(
+            "rfp_margin={},rfp_max_depth={},futility_margin={},lmp_base={},lmp_max_depth={},lmr_div={},qsearch={},qs_max_plies={}",
+            self.rfp_margin,
+            self.rfp_max_depth,
+            self.futility_margin,
+            self.lmp_base,
+            self.lmp_max_depth,
+            self.lmr_div,
+            self.qsearch,
+            self.qs_max_plies
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchInfo {
     pub best_move: Option<Move>,
@@ -54,6 +178,10 @@ pub struct SearchInfo {
 pub struct Searcher {
     tt: TranspositionTable,
     pub nodes: u64,
+    /// Evaluation weights used by this searcher (training hook).
+    pub params: EvalParams,
+    /// Search-pruning settings used by this searcher (training hook).
+    pub sparams: SearchParams,
     killers: [Option<Move>; MAX_PLY * 2],
     history: [[i32; 64]; 12],
     pv_len: [usize; MAX_PLY],
@@ -67,9 +195,21 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new(tt: TranspositionTable) -> Searcher {
+        Searcher::with_params(tt, EvalParams::DEFAULT)
+    }
+
+    /// A searcher that evaluates with explicit (e.g. trained) weights.
+    pub fn with_params(tt: TranspositionTable, params: EvalParams) -> Searcher {
+        Searcher::with_settings(tt, params, SearchParams::DEFAULT)
+    }
+
+    /// Full training hook: evaluation weights plus search prunings.
+    pub fn with_settings(tt: TranspositionTable, params: EvalParams, sparams: SearchParams) -> Searcher {
         Searcher {
             tt,
             nodes: 0,
+            params,
+            sparams,
             killers: [None; MAX_PLY * 2],
             history: [[0; 64]; 12],
             pv_len: [0; MAX_PLY],
@@ -268,7 +408,7 @@ impl Searcher {
         // therefore approximate at the very end of the line, which is
         // unreachable in real games.
         if ply >= MAX_PLY - 1 {
-            return (evaluate(board), None);
+            return (evaluate_with(board, &self.params), None);
         }
         if self.should_stop() {
             return (0, None);
@@ -282,30 +422,39 @@ impl Searcher {
         // principal variation is never truncated.
         #[cfg(feature = "qsearch")]
         if depth <= 2 && !pv_node && !in_check {
-            let sp = evaluate(board);
+            let sp = evaluate_with(board, &self.params);
             if sp + 250 < beta {
-                return (self.qsearch(board, alpha, beta, ply), None);
+                return (self.qsearch(board, alpha, beta, ply, 0), None);
             }
         }
-        // Check extension (capped, Gamma-only via the `qsearch` feature):
-        // checks deserve extra depth because tactics hide there, but an
-        // uncapped extension explodes in checking sequences (10 checks =
-        // +10 depth). Cap at 12 so the search stays focused without magic
-        // depth blow-ups. Alpha searches checks at the same depth, which
-        // keeps the lightweight variant inside its rating band.
+        // Check extension (Gamma-only via the `qsearch` feature): checks
+        // deserve extra depth because tactics hide there, but an uncapped
+        // extension explodes in checking sequences (10 checks = +10 depth).
+        // Cap at 12 so the search stays focused without magic depth
+        // blow-ups.
         #[cfg(feature = "qsearch")]
         let depth = if in_check && depth < 12 { depth + 1 } else { depth };
 
         if depth == 0 {
-            #[cfg(feature = "qsearch")]
-            {
-                let s = self.qsearch(board, alpha, beta, ply);
+            // Quiescence is shared core by default (trainable off for A/Bs):
+            // both variants must resolve captures/evasions at the horizon or
+            // they blunder tactically.
+            if self.sparams.qsearch != 0 {
+                let s = self.qsearch(board, alpha, beta, ply, 0);
                 return (s, None);
             }
-            #[cfg(not(feature = "qsearch"))]
-            {
-                let s = evaluate(board);
-                return (s, None);
+            return (evaluate_with(board, &self.params), None);
+        }
+
+        // Reverse futility (trainable): a non-PV node whose static eval
+        // beats beta by a depth-scaled margin cannot realistically fall back
+        // below beta, so cut on the static score.
+        if !pv_node && !in_check && self.sparams.rfp_margin > 0
+            && depth <= self.sparams.rfp_max_depth
+        {
+            let sp = evaluate_with(board, &self.params);
+            if sp - self.sparams.rfp_margin * depth >= beta {
+                return (sp, None);
             }
         }
 
@@ -339,7 +488,7 @@ impl Searcher {
         // full, which is both slower and weaker (by design).
         #[cfg(feature = "qsearch")]
         if allow_null && !pv_node && !in_check && depth >= 3 && has_non_pawn_material(board) {
-            let eval = evaluate(board);
+            let eval = evaluate_with(board, &self.params);
             if eval >= beta {
                 let saved_side = board.side;
                 let saved_ep = board.ep_square;
@@ -376,6 +525,27 @@ impl Searcher {
         self.path_hashes.push(board.hash);
         for i in 0..moves.len() {
             let m = moves[i];
+            let is_capture = m.is_capture || m.promo.is_some();
+            // Killer test is used by the pruning and LMR below.
+            let is_killer = self.is_killer(m, ply) && !is_capture;
+
+            // Late-move pruning and futility (trainable). Both only skip
+            // quiet moves after at least one legal move has been searched,
+            // so a node can never be mistaken for stalemate.
+            if !pv_node && !in_check && !is_capture && !is_killer && i > 0 && legal_moves > 0 {
+                if self.sparams.lmp_base > 0
+                    && depth <= self.sparams.lmp_max_depth
+                    && i as i32 >= self.sparams.lmp_base + depth * depth
+                {
+                    continue;
+                }
+                if self.sparams.futility_margin > 0 && depth == 1 {
+                    let se = evaluate_with(board, &self.params);
+                    if se + self.sparams.futility_margin <= alpha {
+                        continue;
+                    }
+                }
+            }
 
             board.make_move(&m);
             if board.is_in_check(us) {
@@ -383,12 +553,6 @@ impl Searcher {
                 continue; // illegal: leaves own king in check
             }
             legal_moves += 1;
-
-            let is_capture = m.is_capture || m.promo.is_some();
-            // Killer test is only needed for Gamma's LMR; Alpha never
-            // reduces, so it does not compute it.
-            #[cfg(feature = "qsearch")]
-            let is_killer = self.is_killer(m, ply) && !is_capture;
 
             let new_depth = depth - 1;
             let mut score: i32;
@@ -405,7 +569,14 @@ impl Searcher {
                 // find is real (measure true at short TC / depth).
                 #[cfg(feature = "qsearch")]
                 let reduce = if !pv_node && !is_capture && !is_killer && i > 1 && new_depth > 0 {
-                    1
+                    if self.sparams.lmr_div > 0 {
+                        let r = 0.75
+                            + ((new_depth as f64).ln() * (i as f64).ln()
+                                / self.sparams.lmr_div as f64);
+                        (r as i32).clamp(1, 3)
+                    } else {
+                        1
+                    }
                 } else {
                     0
                 };
@@ -489,17 +660,24 @@ impl Searcher {
         (best, best_move)
     }
 
-    #[cfg(feature = "qsearch")]
-    fn qsearch(&mut self, board: &mut Board, mut alpha: i32, beta: i32, ply: usize) -> i32 {
+    /// Quiescence search (shared core). Resolves captures and, when in
+    /// check, all evasions. Gamma additionally drops negative-SEE captures
+    /// (`qsearch` feature); Alpha keeps the full capture set.
+    fn qsearch(&mut self, board: &mut Board, mut alpha: i32, beta: i32, ply: usize, qply: usize) -> i32 {
         self.nodes += 1;
         if ply >= MAX_PLY - 1 {
-            return evaluate(board);
+            return evaluate_with(board, &self.params);
+        }
+        // Optional cap on capture plies: engines without null-move/LMR can
+        // spend their whole clock here, so the training harness can bound it.
+        if self.sparams.qs_max_plies > 0 && qply >= self.sparams.qs_max_plies as usize {
+            return evaluate_with(board, &self.params);
         }
         if self.should_stop() {
-            return evaluate(board);
+            return evaluate_with(board, &self.params);
         }
         let in_check = board.is_in_check(board.side);
-        let stand_pat = evaluate(board);
+        let stand_pat = evaluate_with(board, &self.params);
         if !in_check {
             if stand_pat >= beta {
                 return beta;
@@ -527,11 +705,12 @@ impl Searcher {
             if !in_check && stand_pat + victim + promo_gain + 200 < alpha {
                 continue;
             }
-            // SEE pruning (pre-make): skip captures that lose material
-            // in a static exchange (SEE < 0) when not in check. In check
-            // every evasion must be tried, so no pruning there. This
-            // cuts hopeless qnodes without deep search — tactics that
-            // win material (SEE >= 0) are always searched.
+            // SEE pruning: skip captures that lose material in a static
+            // exchange (SEE < 0) when not in check. In check every evasion
+            // must be tried, so no pruning there. This cuts hopeless qnodes
+            // without deep search — tactics that win material (SEE >= 0)
+            // are always searched. Shared by both variants: it is what keeps
+            // quiescence cheap enough to pay for its depth cost.
             if !in_check && see(board, &m) < 0 {
                 continue;
             }
@@ -541,7 +720,7 @@ impl Searcher {
                 continue;
             }
             legal += 1;
-            let score = -self.qsearch(board, -beta, -alpha, ply + 1);
+            let score = -self.qsearch(board, -beta, -alpha, ply + 1, qply + 1);
             board.unmake_move();
             if self.should_stop() {
                 break;
@@ -629,7 +808,6 @@ impl Searcher {
         sort_moves_by_score(moves, scores);
     }
 
-    #[cfg(feature = "qsearch")]
     fn order_captures(&self, board: &Board, moves: &mut crate::types::MoveList, _ply: usize) {
         let n = moves.len();
         if n <= 1 {
@@ -721,7 +899,6 @@ fn captured_value_from_board(board: &Board, m: &Move) -> i32 {
 /// Returns `(square, value)` or `None`. King is considered last (value large).
 /// Used by SEE below; written as an explicit piece-by-piece probe so the
 /// exchange can be verified by eye.
-#[cfg(feature = "qsearch")]
 fn least_attacker(board: &Board, side: Color, to: u8, occ: u64) -> Option<(u8, i32)> {
     let base = side.idx() * 6;
     let pieces = &board.pieces;
@@ -754,7 +931,6 @@ fn least_attacker(board: &Board, side: Color, to: u8, occ: u64) -> Option<(u8, i
 /// Static Exchange Evaluation: net material gain for the mover if the
 /// exchange on `m.to` resolves optimally (pure material). >=0 wins,
 /// <0 loses. Used to prune hopeless captures in qsearch.
-#[cfg(feature = "qsearch")]
 fn see(board: &Board, m: &Move) -> i32 {
     if !m.is_capture && m.promo.is_none() { return 0; }
     let attacker = match board.piece_on(m.from) { Some(p) => p, None => return 0 };
@@ -851,7 +1027,30 @@ pub fn is_insufficient_material(board: &Board) -> bool {
 
 /// Convenience: search a position synchronously (no threads, no info).
 pub fn search_position(board: &mut Board, game_history: &[u64], limits: &SearchLimits, tt: &TranspositionTable) -> SearchInfo {
-    let mut s = Searcher::new(tt.clone());
+    search_position_with_params(board, game_history, limits, tt, EvalParams::DEFAULT)
+}
+
+/// Same, with explicit evaluation weights (used by the training harness).
+pub fn search_position_with_params(
+    board: &mut Board,
+    game_history: &[u64],
+    limits: &SearchLimits,
+    tt: &TranspositionTable,
+    params: EvalParams,
+) -> SearchInfo {
+    search_position_with_settings(board, game_history, limits, tt, params, SearchParams::DEFAULT)
+}
+
+/// Full training hook: evaluation weights plus search prunings.
+pub fn search_position_with_settings(
+    board: &mut Board,
+    game_history: &[u64],
+    limits: &SearchLimits,
+    tt: &TranspositionTable,
+    params: EvalParams,
+    sparams: SearchParams,
+) -> SearchInfo {
+    let mut s = Searcher::with_settings(tt.clone(), params, sparams);
     s.search(board, game_history, limits, None, &|_| {})
 }
 

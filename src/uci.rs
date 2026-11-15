@@ -6,6 +6,7 @@
 //! TT / thread state and prints `bestmove`.
 
 use crate::board::Board;
+use crate::eval::{evaluate_with, EvalParams};
 use crate::search::{Searcher, SearchInfo, SearchLimits};
 use crate::tt::{TranspositionTable, DEFAULT_HASH_MB, MAX_HASH_MB};
 use crate::types::Color;
@@ -35,6 +36,7 @@ pub fn run() {
     let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
     let mut threads: usize = 1;
     let mut hash_mb = DEFAULT_HASH_MB;
+    let mut eval_params = EvalParams::DEFAULT;
     let mut game_hashes: Vec<u64> = Vec::new();
     let mut stop_flag = Arc::new(AtomicBool::new(false));
     let mut search_handle: Option<std::thread::JoinHandle<()>> = None;
@@ -64,6 +66,9 @@ pub fn run() {
                 let _ = writeln!(out, "id author {ENGINE_AUTHOR}");
                 let _ = writeln!(out, "option name Hash type spin default {} min 1 max {}", hash_mb, MAX_HASH_MB);
                 let _ = writeln!(out, "option name Threads type spin default {} min 1 max {}", threads, MAX_THREADS);
+                // Training hook: a `key=value,...` weight spec (see
+                // `eval::EvalParams`). Empty / "default" = hand-written baseline.
+                let _ = writeln!(out, "option name EvalParams type string default default");
                 let _ = writeln!(out, "uciok");
                 let _ = out.flush();
             }
@@ -106,6 +111,17 @@ pub fn run() {
                     if let Some(v) = value.and_then(|s| s.parse::<usize>().ok()) {
                         threads = v.clamp(1, MAX_THREADS);
                     }
+                } else if name.eq_ignore_ascii_case("evalparams") {
+                    if let Some(spec) = value {
+                        if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
+                            eval_params = EvalParams::DEFAULT;
+                        } else {
+                            match EvalParams::from_spec(&spec) {
+                                Ok(p) => eval_params = p,
+                                Err(e) => eprintln!("EvalParams rejected: {e}"),
+                            }
+                        }
+                    }
                 }
             }
             "position" => {
@@ -123,8 +139,9 @@ pub fn run() {
                 let board_clone = board.clone();
                 let history_clone = game_hashes.clone();
                 let flag_clone = stop_flag.clone();
+                let params = eval_params;
                 let handle = std::thread::spawn(move || {
-                    let info = search_parallel(&board_clone, &history_clone, &limits, &tt_clone, threads, flag_clone);
+                    let info = search_parallel(&board_clone, &history_clone, &limits, &tt_clone, threads, flag_clone, params);
                     let stdout = std::io::stdout();
                     let mut out = stdout.lock();
                     match info.best_move {
@@ -152,7 +169,7 @@ pub fn run() {
                 let _ = out.flush();
             }
             "eval" => {
-                let s = crate::eval::evaluate(&board);
+                let s = evaluate_with(&board, &eval_params);
                 let _ = writeln!(out, "eval {}", s);
                 let _ = out.flush();
             }
@@ -326,6 +343,7 @@ fn search_parallel(
     tt: &TranspositionTable,
     threads: usize,
     stop: Arc<AtomicBool>,
+    params: EvalParams,
 ) -> SearchInfo {
     #[cfg(not(feature = "threads"))]
     let _ = threads;
@@ -343,7 +361,7 @@ fn search_parallel(
             let limits_main = limits.clone();
             let main_handle = std::thread::spawn(move || {
                 let mut b = board_main;
-                let mut s = Searcher::new(tt_main);
+                let mut s = Searcher::with_params(tt_main, params);
                 let printer = |msg: String| {
                     let stdout = std::io::stdout();
                     let mut out = stdout.lock();
@@ -369,7 +387,7 @@ fn search_parallel(
                 // exits at the next `should_stop` check once `stop` fires.
                 let _ = std::thread::spawn(move || {
                     let mut bb = b;
-                    let mut s = Searcher::new(tt_h);
+                    let mut s = Searcher::with_params(tt_h, params);
                     let _ = s.search(&mut bb, &hist_h, &lim, Some(flag_h), &|_| {});
                 });
             }
@@ -381,7 +399,7 @@ fn search_parallel(
         }
     }
     let mut b = board.clone();
-    let mut s = Searcher::new(tt.clone());
+    let mut s = Searcher::with_params(tt.clone(), params);
     s.search(&mut b, game_history, limits, Some(stop), &|msg: String| {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();

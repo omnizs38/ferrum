@@ -11,11 +11,11 @@ aspirational labels). Everything here is checkable: `src/`, `results/`,
 | Cargo features | `gamma = threads + qsearch + advanced-eval + large-tt` (64 MB TT) | none (8 MB TT) |
 | Move generation | `src/board.rs` — bitboards (`src/bitboard.rs`) + occupied-ray sliders via occupancy-indexed tables (`src/sliders.rs`) | identical |
 | Legality | pseudo-legal + king-safety filter, `is_in_check` via attack tests | identical |
-| Search | negamax + PVS, iterative deepening, aspiration windows (±50, re-centred), null-move pruning (`R = 2 + depth/4`), late-move reduction, qsearch (stand-pat, delta+SEE pruning), check extension capped at 12 | negamax + PVS, iterative deepening, static eval at horizon; **no qsearch, no null-move, no LMR, no aspiration** |
-| Evaluation | tapered MG/EG material + PST (maintained incrementally in `Board::mg_scores/eg_scores`), plus mobility, pawn structure (passed/doubled/isolated/connected/blocked), bishop pair, rook open/semi files, king pawn-shield | material + a **single** PST (the shared `PST`, no EG taper, no positional terms) |
+| Search | negamax + PVS, iterative deepening, aspiration windows (±50, re-centred), null-move pruning (`R = 2 + depth/4`), late-move reduction, qsearch (stand-pat, delta+SEE pruning), check extension capped at 12, reverse futility, LMP, depth-1 futility | negamax + PVS, iterative deepening, qsearch (stand-pat, delta+SEE pruning), reverse futility, LMP, depth-1 futility; **no null-move, no LMR, no razoring, no aspiration** |
+| Evaluation | tapered MG/EG material + PST (maintained incrementally in `Board::mg_scores/eg_scores`), plus mobility, pawn structure (passed/doubled/isolated/connected/blocked), bishop pair, rook open/semi files, king pawn-shield, loose-material hunt, trapped pieces, enemy-king pressure | material + a **single** PST (the shared `PST`, no EG taper, no positional terms) plus a king pawn-shield bonus, an own-loose-material penalty, and tempo |
 | Threads / SMP | Lazy SMP (main + helpers, detached; helps at 200–500 ms, hurts at 1 ms, games split asymmetrically) | single-thread |
 | TT | single-entry table, single-lock `probe_both`, age-based replacement | same structure, 8 MB |
-| Depth 8 (bench) | ~40439 nodes | much shallower at fixed time |
+| Depth 8 (bench) | ~15577 nodes | 273959 nodes (more nodes, cheaper eval) |
 
 ## The "trap-based" and "defensive" labels — verified, then implemented
 
@@ -91,7 +91,42 @@ style impact is real but passive; strength impact within noise
 (−47, CI [−185,78]).
 
 **Bottom line, stated honestly:** the labels were originally aspirations,
-not mechanics; they are now mechanics — Gamma hunts hanging material,
-Alpha values king shelter — verified by unit tests (`attackers_count_and_loose_material_work`)
-and 30-game A/Bs. The line-level behaviour is visible via
-`tools/probe_fen.py` and `tools/compare_evals.py`.
+not mechanics; they are now mechanics — Gamma hunts hanging material and
+traps pieces, Alpha protects its own. Verified by unit tests
+(`loose_material_scan_works`, `trapped_piece_term_works`,
+`alpha_defensive_weight_changes_the_eval`), 400–800-game in-process pairs
+and the `style_*` metrics in `examples/train.rs`.
+
+## 2026-11-15 training run — the styles are now trained, not just hand-set
+
+The 2026-11-15 session made every weight tunable (`eval::EvalParams`) and
+built an in-process paired-game trainer (`examples/train.rs`,
+`tools/train.py`). It then trained each variant toward its objective and
+measured the resulting play with `eval::style_stats`:
+
+| Metric (mean per sampled position) | Gamma (trapping) | Gamma baseline | Alpha (defensive) | Alpha baseline |
+|---|---|---|---|---|
+| Enemy loose material (cp) | **45.5** | 37.2 | — | — |
+| Enemy trapped N/B/R | **0.31** | 0.24 | — | — |
+| Attacks on enemy king ring | **5.17** | 4.52 | — | — |
+| Own loose material (cp) | 37.2 | 45.5 | **39.3** | 72.9 |
+| Own trapped N/B/R | 0.24 | 0.31 | 0.41 | 0.51 |
+| Enemy attacks on own king ring | 4.52 | 5.17 | 4.01 | 3.34 |
+
+The trade is visible and intended:
+
+* Gamma's three trapping weights (`pressure_scale=16`, `trap_bonus=8`,
+  `king_pressure=3`) measured **+41 Elo** at 20k nodes/move (CI +14..+70)
+  and **+15** at 80k (CI −19..+49) — i.e. it pays for its aggression at
+  short TC and is strength-neutral at longer TC while every trapping
+  metric moves the right way.
+* Alpha's defensive weight (`alpha_own_loose=24`) plus tempo measured
+  **+47 Elo** at 80k nodes/move (CI +13..+82) and cut its own hanging
+  material from 57.2 to 40.5 cp. The old hand-set "penalise own loose
+  material" experiment had measured −223 in a 30-game sample; the
+  larger paired-game run shows the sign was wrong, not the idea.
+* Full-package A/Bs: Gamma **+153/+73**, Alpha **+214** at 20k/80k
+  nodes/move and fixed 50 ms respectively (see `ELO.md` for the table).
+
+The styles are therefore not cosmetic: they change the moves, are measured
+on every sampled position, and are worth Elo instead of costing it.

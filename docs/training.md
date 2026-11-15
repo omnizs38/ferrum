@@ -130,8 +130,11 @@ Raw game JSON is git-ignored; the summary tables live in `ELO.md`.
   re-measured at a higher node budget or a fixed clock.
 * Paired openings remove variance but not all of it; 400–800 games give
   roughly ±30 Elo. 10-game Stockfish anchors are ±150 or worse.
-* SPSA was run for a few thousand games, not tens of thousands. Its output
-  was used as a starting point and every adopted weight was validated by a
-  direct A/B; it is not a finished eval tune.
+* SPSA was run for a few thousand games, not tens of thousands. A
+  20-iteration Alpha run from the trained baseline moved material weights
+  by only ±1–2 cp and changed nothing measurable (score indistinguishable
+  from 0.5); the adopted gains came from the larger, 600-game targeted
+  sweeps. Resolving 1–2 cp weight changes needs an order of magnitude more
+  games, so treat SPSA as a starting point, not a finished eval tune.
 * The long-term goals (2000 / 3500) need more than this harness: a learned
   or heavily tuned eval, faster movegen, and far larger training budgets.

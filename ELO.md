@@ -417,6 +417,12 @@ search:      rfp_margin=120,rfp_max_depth=6,futility_margin=100,lmp_base=4,
              lmp_max_depth=4,qsearch=1
 ```
 
+A 20-iteration SPSA pass on Alpha starting from these values moved the
+material weights by only ±1–2 cp and produced no measurable result (the
+per-iteration score fluctuated around 0.5); it was **not** adopted. The
+useful training signal came from the 600-game targeted sweeps above, not
+from a short SPSA run.
+
 **Honest reading:** the training run is a clear strength gain at short and
 medium TC and a clear style gain, but it does **not** reach 2000 for Alpha
 or anything near 3500 for Gamma. The remaining gap is the same one ELO.md

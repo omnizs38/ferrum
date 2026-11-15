@@ -222,6 +222,8 @@ pub struct EvalParams {
     /// Rook file bonuses (cp).
     pub rook_open: i32,
     pub rook_semi: i32,
+    /// Rook on the seventh rank (relative to its own side).
+    pub rook7: i32,
     /// King pawn shield: cp per shield pawn, cap, and per missing pawn.
     pub shield_pawn: i32,
     pub shield_cap: i32,
@@ -288,6 +290,7 @@ impl EvalParams {
         blocked: 8,
         rook_open: 15,
         rook_semi: 8,
+        rook7: 0,
         shield_pawn: 15,
         shield_cap: 45,
         shield_missing: 10,
@@ -307,7 +310,7 @@ impl EvalParams {
     };
 
     /// Names in `to_spec` order; also the accepted `from_spec` keys.
-    pub const KEYS: [&'static str; 28] = [
+    pub const KEYS: [&'static str; 29] = [
         "mob_knight",
         "mob_bishop",
         "mob_rook",
@@ -320,6 +323,7 @@ impl EvalParams {
         "blocked",
         "rook_open",
         "rook_semi",
+        "rook7",
         "shield_pawn",
         "shield_cap",
         "shield_missing",
@@ -354,6 +358,7 @@ impl EvalParams {
             "blocked" => self.blocked = value,
             "rook_open" => self.rook_open = value,
             "rook_semi" => self.rook_semi = value,
+            "rook7" => self.rook7 = value,
             "shield_pawn" => self.shield_pawn = value,
             "shield_cap" => self.shield_cap = value,
             "shield_missing" => self.shield_missing = value,
@@ -424,6 +429,7 @@ impl EvalParams {
             "blocked" => self.blocked,
             "rook_open" => self.rook_open,
             "rook_semi" => self.rook_semi,
+            "rook7" => self.rook7,
             "shield_pawn" => self.shield_pawn,
             "shield_cap" => self.shield_cap,
             "shield_missing" => self.shield_missing,
@@ -801,6 +807,15 @@ fn rook_files(board: &Board, color: Color, p: &EvalParams) -> i32 {
             bonus += p.rook_open; // open file
         } else if own_pawns & file_mask == 0 {
             bonus += p.rook_semi; // semi-open file
+        }
+        if p.rook7 != 0 {
+            let seventh = match color {
+                Color::White => 6,
+                Color::Black => 1,
+            };
+            if rank_of(sq) as i32 == seventh {
+                bonus += p.rook7;
+            }
         }
     }
     bonus

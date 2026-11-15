@@ -326,7 +326,7 @@ requested styles — Alpha defensive (long-term goal 2000), Gamma trapping
 (long-term goal 3500). What was built and measured:
 
 1. **Trainable engine surface.** All positional weights are now
-   `eval::EvalParams` (28 knobs) and the prunings are
+   `eval::EvalParams` (29 knobs) and the prunings are
    `search::SearchParams` (12 knobs). `examples/train.rs` plays A-vs-B games
    entirely in-process (paired openings, colours swapped, fixed node budget
    or clock, style metrics), and `tools/train.py` drives SPSA over the
@@ -456,6 +456,7 @@ noted. **None cleared the keep bar**, so none changed the defaults:
 | `null_r_div=3` | +12 (CI −16..+40) | rejected |
 | `asp_delta=30` | +9 (CI −19..+37) | rejected |
 | `bishop mobility 4` / `knight mobility 5` | +3 / −3 | rejected |
+| rook on seventh (+20) | +2 (CI −26..+30) | rejected |
 | IID at depth 5 | +5 (CI −23..+33) | knob kept, off by default |
 
 The engine is at a local optimum for these knobs at this budget. The

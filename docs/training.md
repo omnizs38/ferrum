@@ -18,7 +18,7 @@ measurements at 300 ms are ≈1870 (Alpha) and ≈1930 (Gamma).
 
 ### 1. Trainable weights (`src/eval.rs`, `src/search.rs`)
 
-Every positional weight is a field of `eval::EvalParams` (28 knobs) and every
+Every positional weight is a field of `eval::EvalParams` (29 knobs) and every
 optional pruning/limit is a field of `search::SearchParams` (12 knobs). The
 `DEFAULT` constants are the trained baseline; a spec string overrides them:
 

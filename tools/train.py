@@ -51,7 +51,7 @@ GAMMA_PARAMS: dict[str, tuple[int, int, int, int, float]] = {
     "mob_bishop": (3, 0, 10, 1, 0.8),
     "mob_rook": (2, 0, 6, 1, 0.6),
     "mob_queen": (1, 0, 4, 1, 0.4),
-    "bishop_pair": (30, 0, 60, 4, 2.0),
+    "bishop_pair": (40, 0, 60, 4, 2.0),
     "passed_scale": (100, 50, 200, 10, 5.0),
     "doubled": (12, 0, 30, 2, 1.5),
     "isolated": (10, 0, 30, 2, 1.5),
@@ -70,7 +70,7 @@ GAMMA_PARAMS: dict[str, tuple[int, int, int, int, float]] = {
 
 ALPHA_PARAMS: dict[str, tuple[int, int, int, int, float]] = {
     "alpha_shield": (8, 0, 30, 2, 1.5),
-    "alpha_castle": (0, 0, 40, 3, 2.0),
+    "alpha_castle": (20, 0, 40, 3, 2.0),
     "alpha_king_danger": (0, 0, 15, 1, 0.8),
     "alpha_own_loose": (24, 0, 40, 3, 2.0),
     "alpha_pawn": (100, 80, 120, 3, 2.0),

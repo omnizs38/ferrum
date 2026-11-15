@@ -99,6 +99,8 @@ The largest gains came from search, not eval, and the two were coupled:
 | quiescence *without* prunings | Alpha | **−262 Elo** (cost too much depth) |
 | own-loose penalty 24 + tempo | Alpha | +47 Elo at 80k nodes (400 g) |
 | trapping trio | Gamma | +41 Elo at 20k (600 g), +15 at 80k |
+| bishop pair 30 → 40 | Gamma | +30 Elo at 20k (600 g), +15 at 80k (400 g) |
+| castled-king bonus | Alpha | strength-neutral; defensive metric improved |
 | whole package vs old settings | Gamma | +153 (20k, 800 g), +73 (80k, 400 g) |
 | whole package vs old settings | Alpha | +214 at 50 ms (400 g) |
 

@@ -386,11 +386,36 @@ in-process numbers at 20k/80k nodes are the statistically useful ones. The
 absolute anchors are 10-game samples with very wide intervals; they place
 both variants near 1900 at 300 ms, not at their long-term goals.
 
-**Bench:** Gamma startpos d8 **51621 → 15577 nodes** (−70%) after the
-prunings; Alpha d8 273959 nodes (the old Alpha had no pruning or
-quiescence, so its node count is not comparable). Tactics suite green for
-both variants; full test suites green (debug + release, both variants);
-`cargo clippy --all-targets -D warnings` clean for both.
+**Bench:** Gamma startpos d8 **51621 → 15577 → 18777 nodes** after the
+search prunings and the second eval pass (the bishop-pair change moves the
+PV, so the node count is not comparable one-for-one); Alpha d8 272511 nodes
+(the old Alpha had no pruning or quiescence, so its node count is not
+comparable). Tactics suite green for both variants; full test suites green
+(debug + release, both variants); `cargo clippy --all-targets -D warnings`
+clean for both.
+
+### Second pass (same session)
+
+Small weight sweeps after the first training run, 600 games each at
+20k nodes/move:
+
+| Change | Result | Verdict |
+|---|---|---|
+| `bishop_pair` 30 → 40 | +30 Elo [+2,+58]; +15 [−19,+49] at 80k (400 g) | kept |
+| `bishop_pair` 40 → 50 | −20 [−48,+8] vs 40 | rejected |
+| `passed_scale` 100 → 130 | −4 [−32,+24] | rejected |
+| `mob_rook` 2 → 3 | +8 [−20,+35] | rejected (noise) |
+| Alpha `alpha_shield` 8 → 12 | +10 [−18,+38] | rejected (noise) |
+| Alpha `alpha_castle` 0 → 20 | −5 [−33,+23], king-ring pressure 3.21 vs 3.39 | kept for the defensive style |
+
+Final trained specs (now `EvalParams::DEFAULT` / `SearchParams::DEFAULT`):
+
+```
+Gamma eval:  pressure_scale=16,trap_bonus=8,king_pressure=3,tempo=15,bishop_pair=40
+Alpha eval:  alpha_own_loose=24,tempo=15,alpha_castle=20
+search:      rfp_margin=120,rfp_max_depth=6,futility_margin=100,lmp_base=4,
+             lmp_max_depth=4,qsearch=1
+```
 
 **Honest reading:** the training run is a clear strength gain at short and
 medium TC and a clear style gain, but it does **not** reach 2000 for Alpha

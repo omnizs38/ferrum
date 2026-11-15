@@ -34,8 +34,8 @@ cargo clippy --all-targets -- -D warnings     # currently clean
 - `tests/uci_smoke.rs` spawns the real binary via `CARGO_BIN_EXE_ferrum`.
   Changing stdout, threading or command ordering can break it.
 - Benchmarks must be release builds. `cargo run --release --example bench`
-  prints startpos nodes by depth; current Gamma d8 baseline is 15577 nodes
-  (Alpha d8 is 273959: it has a cheaper eval and no null-move/LMR). Report
+  prints startpos nodes by depth; current Gamma d8 baseline is 18777 nodes
+  (Alpha d8 is 272511: it has a cheaper eval and no null-move/LMR). Report
   the node delta for search/eval changes, and use `examples/tactics.rs` for
   mate/material sanity checks.
 - Training: `cargo run --release --example train -- --a <spec> --b <spec>`

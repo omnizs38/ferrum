@@ -267,6 +267,11 @@ impl EvalParams {
     ///   TC) while moving every trapping metric in the intended direction
     ///   (enemy loose material 45.5 vs 37.2 cp, enemy trapped pieces 0.31
     ///   vs 0.24, enemy-king pressure 5.17 vs 4.52 at 20k nodes).
+    /// * Second pass: `bishop_pair = 40` measured +30 Elo (CI +2..+58) at
+    ///   20k nodes over 600 games; 50 lost to 40 by −20. `alpha_castle = 20`
+    ///   is strength-neutral (−5, CI −33..+23) and moves the defensive
+    ///   king-ring metric the right way (3.21 vs 3.39), so it is kept for
+    ///   Alpha's identity.
     ///
     /// Gamma's search prunings (the larger gain) are in
     /// `SearchParams::DEFAULT`, not here.
@@ -275,7 +280,7 @@ impl EvalParams {
         mob_bishop: 3,
         mob_rook: 2,
         mob_queen: 1,
-        bishop_pair: 30,
+        bishop_pair: 40,
         passed_scale: 100,
         doubled: 12,
         isolated: 10,
@@ -290,7 +295,7 @@ impl EvalParams {
         trap_bonus: 8,
         king_pressure: 3,
         alpha_shield: 8,
-        alpha_castle: 0,
+        alpha_castle: 20,
         alpha_king_danger: 0,
         alpha_own_loose: 24,
         alpha_pawn: 100,

@@ -73,6 +73,15 @@ pub struct SearchParams {
     /// Maximum capture plies inside quiescence (0 = unlimited). A low cap
     /// keeps qsearch cheap on engines without null-move/LMR pruning.
     pub qs_max_plies: i32,
+    /// Null-move reduction: `R = null_r_base + depth / null_r_div`.
+    pub null_r_base: i32,
+    pub null_r_div: i32,
+    /// Aspiration window half-width in centipawns at the root.
+    pub asp_delta: i32,
+    /// Internal iterative deepening: at PV nodes with no TT move, do a
+    /// reduced-depth search for a move to order first. 0 = off, otherwise
+    /// the minimum depth at which it runs.
+    pub iid_min_depth: i32,
 }
 
 impl Default for SearchParams {
@@ -103,9 +112,13 @@ impl SearchParams {
         lmr_div: 0,
         qsearch: 1,
         qs_max_plies: 0,
+        null_r_base: 2,
+        null_r_div: 4,
+        asp_delta: 50,
+        iid_min_depth: 0,
     };
 
-    pub const KEYS: [&'static str; 8] = [
+    pub const KEYS: [&'static str; 12] = [
         "rfp_margin",
         "rfp_max_depth",
         "futility_margin",
@@ -114,6 +127,10 @@ impl SearchParams {
         "lmr_div",
         "qsearch",
         "qs_max_plies",
+        "null_r_base",
+        "null_r_div",
+        "asp_delta",
+        "iid_min_depth",
     ];
 
     pub fn set(&mut self, key: &str, value: i32) -> Result<(), String> {
@@ -126,6 +143,10 @@ impl SearchParams {
             "lmr_div" => self.lmr_div = value,
             "qsearch" => self.qsearch = value,
             "qs_max_plies" => self.qs_max_plies = value,
+            "null_r_base" => self.null_r_base = value,
+            "null_r_div" => self.null_r_div = value,
+            "asp_delta" => self.asp_delta = value,
+            "iid_min_depth" => self.iid_min_depth = value,
             other => return Err(format!("unknown search parameter '{other}'")),
         }
         Ok(())
@@ -152,7 +173,7 @@ impl SearchParams {
 
     pub fn to_spec(&self) -> String {
         format!(
-            "rfp_margin={},rfp_max_depth={},futility_margin={},lmp_base={},lmp_max_depth={},lmr_div={},qsearch={},qs_max_plies={}",
+            "rfp_margin={},rfp_max_depth={},futility_margin={},lmp_base={},lmp_max_depth={},lmr_div={},qsearch={},qs_max_plies={},null_r_base={},null_r_div={},asp_delta={},iid_min_depth={}",
             self.rfp_margin,
             self.rfp_max_depth,
             self.futility_margin,
@@ -160,7 +181,11 @@ impl SearchParams {
             self.lmp_max_depth,
             self.lmr_div,
             self.qsearch,
-            self.qs_max_plies
+            self.qs_max_plies,
+            self.null_r_base,
+            self.null_r_div,
+            self.asp_delta,
+            self.iid_min_depth
         )
     }
 }
@@ -253,6 +278,11 @@ impl Searcher {
         let mut best_move: Option<Move> = self.tt.probe_move(board.hash);
         let mut best_score = 0i32;
         let mut completed_depth = 0i32;
+        // Last *completed* iteration's PV. A partial iteration can reset the
+        // PV table (and then be discarded), which used to leave `SearchInfo`
+        // with an empty PV even though a full line had been found — bad for
+        // library/FFI callers that report the PV to a bot.
+        let mut best_pv: Vec<Move> = Vec::new();
 
         // Order root moves by TT move first so the first iteration is sensible.
         for depth in 1..=max_depth {
@@ -274,6 +304,7 @@ impl Searcher {
                 let elapsed = start.elapsed().as_millis().max(1) as u64;
                 let nps = (self.nodes * 1000) / elapsed;
                 let pv_moves = self.extract_pv();
+                best_pv = pv_moves.clone();
                 let mut pv_str = String::new();
                 for m in pv_moves.iter() {
                     if !pv_str.is_empty() {
@@ -300,7 +331,14 @@ impl Searcher {
         }
 
         let time_ms = start.elapsed().as_millis() as u64;
-        let pv = self.extract_pv();
+        let pv = if best_pv.is_empty() { self.extract_pv() } else { best_pv };
+        // A search stopped before its first iteration completes (immediate
+        // `quit`, a tiny clock, a stopped server request) must still hand the
+        // caller a legal move when one exists — bots rely on that.
+        if best_move.is_none() {
+            let legal = board.generate_legal_moves();
+            best_move = legal.as_slice().first().copied();
+        }
         SearchInfo { best_move, score: best_score, depth: completed_depth, nodes: self.nodes, time_ms, pv }
     }
 
@@ -322,7 +360,8 @@ impl Searcher {
         // one-sided widening a score exactly on the edge (e.g. 30 in [30,90])
         // oscillates forever. A hard cap falls back to full window.
         // Delta 50 (was 30): fewer fail-high/low re-searches at short TC.
-        let mut delta = 50;
+        // Trainable via `SearchParams::asp_delta`.
+        let mut delta = self.sparams.asp_delta.max(1);
         let (mut alpha, mut beta) = if depth == 1 {
             (-INF, INF)
         } else {
@@ -461,7 +500,7 @@ impl Searcher {
         // TT probe share the same single lock for both cases: one lock per
         // node. PV nodes keep the depth-sufficient entry so the singular
         // extension can use its bound (used only for the bound test).
-        let (tt_move, tt_entry) = self.tt.probe_both(board.hash, depth);
+        let (mut tt_move, tt_entry) = self.tt.probe_both(board.hash, depth);
         let mut tt_score: Option<i32> = None;
         if !pv_node {
             if let Some(e) = tt_entry {
@@ -499,7 +538,8 @@ impl Searcher {
                 board.halfmove += 1;
                 board.hash = board.compute_hash();
                 self.path_hashes.push(board.hash);
-                let r = 2 + depth / 4;
+                let r = self.sparams.null_r_base
+                    + depth / self.sparams.null_r_div.max(1);
                 let (score, _) = self.negamax(board, depth - 1 - r, -beta, -beta + 1, ply + 1, false, false);
                 self.path_hashes.pop();
                 board.side = saved_side;
@@ -509,6 +549,21 @@ impl Searcher {
                 if !self.should_stop() && -score >= beta {
                     return (-score.max(beta), None);
                 }
+            }
+        }
+
+        // Internal iterative deepening (trainable, off by default): at a PV
+        // node without a TT move, a shallow search finds a move worth trying
+        // first, which usually pays for itself in the full-width search.
+        if self.sparams.iid_min_depth > 0
+            && tt_move.is_none()
+            && pv_node
+            && depth > 2
+            && depth >= self.sparams.iid_min_depth
+        {
+            let (_, m) = self.negamax(board, (depth - 2).max(1), alpha, beta, ply, pv_node, allow_null);
+            if m.is_some() {
+                tt_move = m;
             }
         }
 
@@ -1073,6 +1128,8 @@ mod tests {
         let best = info.best_move.expect("a best move");
         assert_eq!(best.to_uci(), "h5f7", "expected Qxf7# got {} score {}", best.to_uci(), info.score);
         assert!(info.score > MATE - 100, "score {} should be mate", info.score);
+        // Library/FFI callers need the PV, not just the move.
+        assert_eq!(info.pv.first().map(|m| m.to_uci()), Some("h5f7".to_string()));
     }
 
     #[test]
@@ -1093,8 +1150,10 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(true));
         let mut s = Searcher::new(tt);
         let info = s.search(&mut b, &[], &SearchLimits::fixed_depth(20), Some(stop), &|_| {});
-        // Search must return promptly despite depth 20 (flag already set).
+        // Search must return promptly despite depth 20 (flag already set),
+        // and still supply a legal move for a caller that needs one.
         assert!(info.nodes < 100_000);
+        assert!(info.best_move.is_some());
     }
 
     #[test]

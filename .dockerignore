@@ -1,0 +1,10 @@
+target/
+.git/
+stockfish
+stockfish.exe
+stockfish.zip
+stockfish_sf19/
+results/
+training/
+docs/logo-alpha.webp
+docs/logo-gamma.webp

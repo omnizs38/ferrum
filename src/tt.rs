@@ -57,6 +57,17 @@ pub const MAX_HASH_MB: usize = 4096;
 #[cfg(not(feature = "large-tt"))]
 pub const MAX_HASH_MB: usize = 8;
 
+/// Effective default hash size: [`DEFAULT_HASH_MB`], overridable with the
+/// `FERRUM_HASH_MB` environment variable. Containers and multi-tenant bots
+/// can cap per-instance memory without changing the UCI defaults.
+pub fn default_hash_mb() -> usize {
+    std::env::var("FERRUM_HASH_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_HASH_MB)
+        .clamp(1, MAX_HASH_MB)
+}
+
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> TranspositionTable {
         let mut tt = TranspositionTable {

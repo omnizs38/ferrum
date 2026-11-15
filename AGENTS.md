@@ -66,6 +66,26 @@ cargo clippy --all-targets -- -D warnings     # currently clean
   must stop-and-join the running search before touching board/TT state, and
   its `bestmove` must be printed before the reset. This ordering is tested.
 
+## Server / embedding surface
+
+- `src/ffi.rs` is the C ABI (`cdylib`). Keep every pointer-taking entry
+  point `unsafe`, null-safe, `catch_unwind`-guarded, and returning the
+  documented error codes; the module-level `# Safety` contract is the shared
+  documentation. Do not add global mutable state: handles must stay
+  independent for one-handle-per-worker servers.
+- `uci::run_with_io` / `run_with_config` must stay generic over
+  `BufRead` and `Write + Send + 'static`; `Output<W>` is the only writer
+  passed to the search thread.
+- Release builds use `panic = "unwind"` (not abort) so the FFI can catch
+  panics. Do not switch it back to abort.
+- `FERRUM_HASH_MB` caps the default TT size for containers; `Hash` still
+  overrides it per instance.
+- Embedding is tested by `tests/uci_embed.rs` (in-memory UCI loop) and the
+  `src/ffi.rs` unit tests (lifecycle, options, atomic rejection, mate JSON,
+  concurrent handles). `tools/embed_demo.py` loads the built DLL/SO.
+- On Windows, Cargo warns that the bin and lib both produce `ferrum.pdb`;
+  this is a known benign collision (Linux/macOS are unaffected).
+
 ## Strength / gauntlet workflow
 
 - `tools/*.py` are stdlib-only except the texel tools (NumPy); they need

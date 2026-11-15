@@ -327,7 +327,7 @@ requested styles — Alpha defensive (long-term goal 2000), Gamma trapping
 
 1. **Trainable engine surface.** All positional weights are now
    `eval::EvalParams` (28 knobs) and the prunings are
-   `search::SearchParams` (8 knobs). `examples/train.rs` plays A-vs-B games
+   `search::SearchParams` (12 knobs). `examples/train.rs` plays A-vs-B games
    entirely in-process (paired openings, colours swapped, fixed node budget
    or clock, style metrics), and `tools/train.py` drives SPSA over the
    weights plus a targeted style search. The engine also accepts a weight
@@ -422,6 +422,47 @@ material weights by only ±1–2 cp and produced no measurable result (the
 per-iteration score fluctuated around 0.5); it was **not** adopted. The
 useful training signal came from the 600-game targeted sweeps above, not
 from a short SPSA run.
+
+### 2026-11-16 session — server embedding and convergence sweeps
+
+This session's main work was **server-side loading** (see
+[`docs/server.md`](docs/server.md)): a C ABI (`src/ffi.rs`, `cdylib` +
+`rlib`) with one independent handle per game, atomic strict-FEN position
+updates, panic containment, `go`/`go_json`, options, and string ownership;
+`uci::run_with_io`/`run_with_config` for Rust services; CLI flags for
+`--hash`/`--threads`/`--eval-params`/`--search-params`; `FERRUM_HASH_MB` to
+cap per-instance memory; and a multi-stage `Dockerfile`. `tests/uci_embed.rs`
+runs the loop over in-memory buffers, `src/ffi.rs` tests cover the handle
+lifecycle (including four concurrent handles), and `tools/embed_demo.py`
+loads the built DLL and searches in-process.
+
+Two engine correctness/robustness fixes came out of it:
+
+* `SearchInfo.pv` could be empty when the final (partial) iteration reset
+  the PV table before being discarded; the last completed PV is now kept.
+  Library/FFI callers rely on it.
+* A search stopped before its first iteration completed (immediate `quit`,
+  tiny clock) now returns a legal move instead of `bestmove (none)`.
+
+Strength sweeps this session, 600 paired games at 20k nodes/move unless
+noted. **None cleared the keep bar**, so none changed the defaults:
+
+| Candidate | Result | Verdict |
+|---|---|---|
+| Fail-soft qsearch | **−63** (CI −91..−35) | reverted |
+| 2-way TT buckets | 6–6–28 at 50 ms, 0 Elo (CI ±111) | reverted |
+| LMR log formula (div 4 / div 2) | +5 / −4 | rejected |
+| `null_r_base=3` | +2 (CI −26..+30) | rejected |
+| `null_r_div=3` | +12 (CI −16..+40) | rejected |
+| `asp_delta=30` | +9 (CI −19..+37) | rejected |
+| `bishop mobility 4` / `knight mobility 5` | +3 / −3 | rejected |
+| IID at depth 5 | +5 (CI −23..+33) | knob kept, off by default |
+
+The engine is at a local optimum for these knobs at this budget. The
+training surface now exposes 12 search knobs (`null_r_base`, `null_r_div`,
+`asp_delta`, `iid_min_depth` added) for future runs with larger samples.
+Gamma bench d8 is unchanged at **18777 nodes**; both variants' benches and
+the tactics suite are unchanged.
 
 **Honest reading:** the training run is a clear strength gain at short and
 medium TC and a clear style gain, but it does **not** reach 2000 for Alpha

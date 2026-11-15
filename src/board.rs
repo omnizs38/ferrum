@@ -195,6 +195,17 @@ impl Board {
     // ------------------------------------------------------------ FEN I/O
 
     pub fn from_fen(fen: &str) -> Result<Board, String> {
+        Self::parse_fen(fen, false)
+    }
+
+    /// Parse and *validate* a FEN for untrusted input (UCI clients, bots).
+    /// Rejects missing/duplicate kings, pawns on back ranks and adjacent
+    /// kings in addition to the syntax checks in [`Board::from_fen`].
+    pub fn from_fen_strict(fen: &str) -> Result<Board, String> {
+        Self::parse_fen(fen, true)
+    }
+
+    fn parse_fen(fen: &str, strict: bool) -> Result<Board, String> {
         let mut b = Board::empty();
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
@@ -206,12 +217,16 @@ impl Board {
         if rows.len() != 8 {
             return Err("FEN board must have 8 ranks".into());
         }
-        for (ri, row) in rows.iter().enumerate() {
-            sq = (7 - ri as u8) * 8;
+        for (pi, row) in rows.iter().enumerate() {
+            sq = (7 - pi as u8) * 8;
+            let mut files = 0u8;
             for ch in row.chars() {
                 if ch.is_ascii_digit() {
-                    sq += ch as u8 - b'0';
+                    let n = ch as u8 - b'0';
+                    sq += n;
+                    files += n;
                 } else {
+                    files += 1;
                     let color = if ch.is_uppercase() { Color::White } else { Color::Black };
                     let kind = match ch.to_ascii_lowercase() {
                         'p' => PieceType::Pawn,
@@ -228,6 +243,9 @@ impl Board {
                     b.put_piece(sq, Piece { kind, color });
                     sq += 1;
                 }
+            }
+            if files != 8 {
+                return Err(format!("FEN rank {} has {files} files, expected 8", 8 - pi));
             }
         }
         // Side to move.
@@ -257,6 +275,25 @@ impl Board {
         };
         b.halfmove = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
         b.fullmove = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
+        if strict {
+            // Servers receive FENs from untrusted clients: reject impossible
+            // positions instead of searching with a default `king_sq`.
+            let white_kings = b.pieces[5].count_ones();
+            let black_kings = b.pieces[11].count_ones();
+            if white_kings != 1 || black_kings != 1 {
+                return Err(format!(
+                    "FEN must have exactly one king per side (white {white_kings}, black {black_kings})"
+                ));
+            }
+            const RANK_1: u64 = 0x0000_0000_0000_00FF;
+            const RANK_8: u64 = 0xFF00_0000_0000_0000;
+            if (b.pieces[0] | b.pieces[6]) & (RANK_1 | RANK_8) != 0 {
+                return Err("FEN has a pawn on the first or last rank".into());
+            }
+            if king_attacks(b.king_sq[0]) & bit(b.king_sq[1]) != 0 {
+                return Err("FEN has adjacent kings".into());
+            }
+        }
         b.undo_stack.clear();
         b.hash = b.compute_hash();
         Ok(b)
@@ -824,6 +861,19 @@ mod tests {
         let legal = b.generate_legal_moves();
         let a7_moves: Vec<&Move> = legal.iter().filter(|m| m.from == 48).collect();
         assert_eq!(a7_moves.len(), 4);
+    }
+
+    #[test]
+    fn strict_fen_rejects_impossible_positions() {
+        assert!(Board::from_fen_strict("8/8/8/8/8/8/8/8 w - - 0 1").is_err());
+        assert!(Board::from_fen_strict("k7/8/8/8/8/8/8/K6K w - - 0 1").is_err());
+        assert!(Board::from_fen_strict("kK6/8/8/8/8/8/8/8 w - - 0 1").is_err());
+        assert!(Board::from_fen_strict("k6K/8/8/8/8/8/8/PPPPPPPP w - - 0 1").is_err());
+        assert!(Board::from_fen_strict("k7/8/8/8/8/8/9/K7 w - - 0 1").is_err());
+        // Legal positions pass, and the permissive parser still accepts the
+        // king-less fixtures used by evaluation unit tests.
+        assert!(Board::from_fen_strict("k7/8/8/8/8/8/8/K7 w - - 0 1").is_ok());
+        assert!(Board::from_fen("4r3/8/8/8/r3N3/8/8/K7 b - - 0 1").is_ok());
     }
 
     #[test]

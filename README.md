@@ -77,6 +77,41 @@ quit
 Debug helpers (not part of the UCI spec): `d`, `eval`, `perft <n>`,
 `divide <n>`.
 
+## Server / bot embedding
+
+The engine builds both a binary and a shared library (`rlib` + `cdylib`).
+Servers can load `libferrum.so` / `ferrum.dll` / `libferrum.dylib` through
+the C ABI in `src/ffi.rs` and search in-process instead of piping a
+subprocess:
+
+```c
+FerrumEngine *e = ferrum_create();
+ferrum_set_position(e, "startpos", "e2e4 e7e5");
+char *json = ferrum_go_json(e, 100, 0, 0, 1);   /* 100 ms */
+puts(json);                                      /* bestmove/score/depth/pv */
+ferrum_string_free(json);
+ferrum_destroy(e);
+```
+
+Highlights: one independent handle per game/worker, panic-safe entry points,
+atomic position updates (invalid FENs/illegal moves are rejected), strict
+FEN validation, `EvalParams`/`SearchParams` options, and `FERRUM_HASH_MB`
+for per-instance memory caps in containers. `tools/embed_demo.py` loads the
+built library and runs a search; `tools/embed_demo.py --help` has options.
+
+Rust services can run the UCI loop over any reader/writer with
+`ferrum::uci::run_with_config` (see `tests/uci_embed.rs`), or use
+`ferrum::search::Searcher` directly. A multi-stage `Dockerfile` builds the
+binary and the library, runs as a non-root user and caps the default hash.
+Full integration notes: [`docs/server.md`](docs/server.md).
+
+The binary also accepts service-friendly initial options:
+
+```sh
+ferrum --hash 16 --threads 4 --eval-params "pressure_scale=16,trap_bonus=8"
+ferrum --version
+```
+
 ## Strength probes (examples)
 
 ```sh
@@ -127,8 +162,13 @@ src/
   uci.rs      UCI loop: uci/isready/setoption/position/go + in-engine time
               management (go wtime/btime/winc/binc/movestogo/movetime/
               depth/nodes/infinite). Search runs on a background thread so
-              `stop`/`quit` never deadlock stdout.
-  main.rs     Thin entry point (prints the variant name to stderr).
+              `stop`/`quit` never deadlock stdout. `run_with_io`/
+              `run_with_config` run the same loop over any reader/writer.
+  ffi.rs      C ABI for servers/bots: opaque per-game handles, create/
+              destroy, atomic set_position (strict FEN), go/go_json,
+              evaluate, options, string ownership, panic containment.
+  main.rs     Thin entry point: CLI flags (--hash/--threads/--eval-params/
+              --search-params/--version/--help) then the UCI loop.
 ```
 
 Representation notes:
@@ -173,6 +213,7 @@ need NumPy):
 |---|---|
 | `gauntlet.py` | UCI match harness — plays paired games against another engine or a Stockfish anchor, writes `results/*.json` |
 | `train.py` | Training driver — builds `examples/train` for a variant, runs SPSA over `EvalParams`, then a targeted style search; writes `training/*.json` |
+| `embed_demo.py` | Loads the built shared library via `ctypes` and runs an in-process search (server/bot smoke test) |
 | `verify_mates.py` | Re-checks mate claims with Ferrum itself (`perft 1 == 0` + mate score) |
 | `session_summary.py` | Tabulates every gauntlet JSON in `results/` into one session table |
 | `probe_fen.py` | Asks an engine for its best move on a FEN (`go depth N`) |
@@ -199,6 +240,9 @@ need NumPy):
 * UCI end-to-end (handshake, `go depth`, mate-in-one, clock + `stop`,
   `Threads`/`Hash`/`EvalParams` options, `ucinewgame` full reset) —
   `tests/uci_smoke.rs` spawns the real binary via `CARGO_BIN_EXE_ferrum`.
+* Server embedding: `tests/uci_embed.rs` runs the UCI loop over in-memory
+  buffers (including a rejected bad FEN); `src/ffi.rs` unit tests cover
+  handle lifecycle, search, options, invalid positions and null pointers.
 * Protocol rule: while a search is running, `stop` stops it and `position` /
   `ucinewgame` stop-and-join it (printing its `bestmove`, possibly
   `bestmove (none)`) before the board/TT reset — a stale bestmove is never

@@ -8,6 +8,9 @@ license = "GPL-3.0-or-later"
 [lib]
 name = "ferrum"
 path = "src/lib.rs"
+# rlib for the Rust binary/tests; cdylib so bots and servers can load the
+# engine in-process through the C ABI in `src/ffi.rs`.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "ferrum"
@@ -16,9 +19,12 @@ path = "src/main.rs"
 [features]
 # Default build is Ferrum Gamma (the standard version).
 default = ["gamma"]
-# Ferrum Gamma = the standard version: multithreading, full TT, quiescence, advanced eval.
+# Ferrum Gamma = the standard version: multithreading, full TT, quiescence,
+# advanced eval, and the extra aggressive search set.
 # Ferrum Alpha = lightweight version: build with `--no-default-features`
-# for single-threaded, small TT, no quiescence, simple evaluation.
+# (single-threaded, small TT, simple evaluation). Both share quiescence,
+# reverse futility, LMP and futility; `qsearch` here means Gamma's extra
+# null-move/LMR/razoring/check-extension set.
 gamma = ["threads", "qsearch", "advanced-eval", "large-tt"]
 threads = []
 qsearch = []
@@ -31,4 +37,6 @@ large-tt = []
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# unwind (not abort): the FFI layer uses catch_unwind so a bad position or
+# an embedder bug returns an error code instead of killing the whole server.
+panic = "unwind"

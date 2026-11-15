@@ -4,39 +4,111 @@
 //! plus the test helpers `d`, `eval` and `perft`. The search itself runs in
 //! [`crate::search`]; this module only parses commands, manages the board /
 //! TT / thread state and prints `bestmove`.
+//!
+//! [`run_with_io`] runs the same loop over an arbitrary `BufRead`/`Write`
+//! pair, which is what servers embedding the engine (rather than spawning a
+//! process) use. The binary calls [`run`], which is just stdin/stdout.
 
 use crate::board::Board;
 use crate::eval::{evaluate_with, EvalParams};
-use crate::search::{Searcher, SearchInfo, SearchLimits};
-use crate::tt::{TranspositionTable, DEFAULT_HASH_MB, MAX_HASH_MB};
+use crate::search::{SearchInfo, SearchLimits, SearchParams, Searcher};
+use crate::tt::{default_hash_mb, TranspositionTable, MAX_HASH_MB};
 use crate::types::Color;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "gamma")]
-const ENGINE_NAME: &str = "Ferrum Gamma";
+pub const ENGINE_NAME: &str = "Ferrum Gamma";
 #[cfg(not(feature = "gamma"))]
-const ENGINE_NAME: &str = "Ferrum Alpha";
-const ENGINE_AUTHOR: &str = "Ferrum";
+pub const ENGINE_NAME: &str = "Ferrum Alpha";
+pub const ENGINE_AUTHOR: &str = "Ferrum";
 
 #[cfg(feature = "threads")]
 const MAX_THREADS: usize = 8;
 #[cfg(not(feature = "threads"))]
 const MAX_THREADS: usize = 1;
 
+/// Thread-safe line writer. A server may attach the engine to a pipe/socket
+/// (or several engines to one log), so every write is short and locks only
+/// for the duration of one line — never while joining a search thread.
+pub struct Output<W: Write> {
+    inner: Arc<Mutex<W>>,
+}
+
+impl<W: Write> Clone for Output<W> {
+    fn clone(&self) -> Self {
+        Output { inner: Arc::clone(&self.inner) }
+    }
+}
+
+impl<W: Write> Output<W> {
+    pub fn new(writer: W) -> Output<W> {
+        Output { inner: Arc::new(Mutex::new(writer)) }
+    }
+
+    pub fn line(&self, text: &str) {
+        if let Ok(mut w) = self.inner.lock() {
+            let _ = writeln!(w, "{text}");
+            let _ = w.flush();
+        }
+    }
+
+    pub fn flush(&self) {
+        if let Ok(mut w) = self.inner.lock() {
+            let _ = w.flush();
+        }
+    }
+}
+
+/// Runtime configuration for [`run_with_config`]. The binary's CLI flags
+/// map onto these fields; embedders can too.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub hash_mb: usize,
+    pub threads: usize,
+    pub eval: EvalParams,
+    pub search: SearchParams,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            hash_mb: default_hash_mb(),
+            threads: 1,
+            eval: EvalParams::DEFAULT,
+            search: SearchParams::DEFAULT,
+        }
+    }
+}
+
+/// Run the UCI loop on stdin/stdout (the normal binary entry point).
 pub fn run() {
-    let stdin = std::io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
-    // `Stdout` (not `StdoutLock`) so the search thread can print while the
-    // main thread blocks on `read_line`. A held `StdoutLock` would deadlock `go`.
-    let mut out = std::io::stdout();
+    run_with_config(std::io::stdin().lock(), std::io::stdout(), Config::default());
+}
+
+/// Run the UCI loop over any reader/writer pair with default options. The
+/// writer is shared with the background search thread, so it must be
+/// `Send + 'static` (use a `Vec<u8>`/`Cursor` pair in tests, a pipe or a
+/// socket in servers).
+pub fn run_with_io<R: BufRead, W: Write + Send + 'static>(reader: R, writer: W) {
+    run_with_config(reader, writer, Config::default());
+}
+
+/// Run the UCI loop with explicit initial options.
+pub fn run_with_config<R: BufRead, W: Write + Send + 'static>(
+    mut reader: R,
+    writer: W,
+    config: Config,
+) {
+    let out = Output::new(writer);
 
     let mut board = Board::startpos();
-    let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
-    let mut threads: usize = 1;
-    let mut hash_mb = DEFAULT_HASH_MB;
-    let mut eval_params = EvalParams::DEFAULT;
+    let mut tt = TranspositionTable::new(config.hash_mb.clamp(1, MAX_HASH_MB));
+    let mut threads: usize = config.threads.clamp(1, MAX_THREADS);
+    let mut hash_mb = config.hash_mb.clamp(1, MAX_HASH_MB);
+    let mut eval_params = config.eval;
+    let mut search_params = config.search;
     let mut game_hashes: Vec<u64> = Vec::new();
     let mut stop_flag = Arc::new(AtomicBool::new(false));
     let mut search_handle: Option<std::thread::JoinHandle<()>> = None;
@@ -62,19 +134,22 @@ pub fn run() {
         match cmd {
             "uci" => {
                 let name = ENGINE_NAME;
-                let _ = writeln!(out, "id name {name}");
-                let _ = writeln!(out, "id author {ENGINE_AUTHOR}");
-                let _ = writeln!(out, "option name Hash type spin default {} min 1 max {}", hash_mb, MAX_HASH_MB);
-                let _ = writeln!(out, "option name Threads type spin default {} min 1 max {}", threads, MAX_THREADS);
-                // Training hook: a `key=value,...` weight spec (see
-                // `eval::EvalParams`). Empty / "default" = hand-written baseline.
-                let _ = writeln!(out, "option name EvalParams type string default default");
-                let _ = writeln!(out, "uciok");
-                let _ = out.flush();
+                out.line(&format!("id name {name}"));
+                out.line(&format!("id author {ENGINE_AUTHOR}"));
+                out.line(&format!(
+                    "option name Hash type spin default {hash_mb} min 1 max {MAX_HASH_MB}"
+                ));
+                out.line(&format!(
+                    "option name Threads type spin default {threads} min 1 max {MAX_THREADS}"
+                ));
+                // Training hooks: `key=value,...` specs (see `EvalParams` and
+                // `SearchParams`). Empty / "default" = trained baseline.
+                out.line("option name EvalParams type string default default");
+                out.line("option name SearchParams type string default default");
+                out.line("uciok");
             }
             "isready" => {
-                let _ = writeln!(out, "readyok");
-                let _ = out.flush();
+                out.line("readyok");
             }
             "ucinewgame" => {
                 // A search may still be running from the previous game;
@@ -94,7 +169,7 @@ pub fn run() {
                 // Parse loosely: `name <name> value <value>`.
                 let lower = rest.to_lowercase();
                 if let Some(pos) = lower.find("name") {
-                    let after = &rest[pos + 4..].trim();
+                    let after = rest[pos + 4..].trim();
                     if let Some(vpos) = after.to_lowercase().find(" value ") {
                         name = after[..vpos].trim().to_string();
                         value = Some(after[vpos + 7..].trim().to_string());
@@ -122,6 +197,17 @@ pub fn run() {
                             }
                         }
                     }
+                } else if name.eq_ignore_ascii_case("searchparams") {
+                    if let Some(spec) = value {
+                        if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
+                            search_params = SearchParams::DEFAULT;
+                        } else {
+                            match SearchParams::from_spec(&spec) {
+                                Ok(p) => search_params = p,
+                                Err(e) => eprintln!("SearchParams rejected: {e}"),
+                            }
+                        }
+                    }
                 }
             }
             "position" => {
@@ -129,7 +215,18 @@ pub fn run() {
                 // in-flight search is on a stale position. Stop, join and
                 // then reset, so no stale bestmove lands in the new game.
                 stop_and_join(&mut search_handle, &mut stop_flag);
-                board = parse_position(trimmed, &mut game_hashes);
+                match parse_position(trimmed) {
+                    Ok((b, h)) => {
+                        board = b;
+                        game_hashes = h;
+                    }
+                    Err(e) => {
+                        // Keep the previous position; a server must not start
+                        // searching a bogus board because one request was bad.
+                        out.line(&format!("info string invalid position: {e}"));
+                        eprintln!("position rejected: {e}");
+                    }
+                }
             }
             "go" => {
                 // Stop any previous search before starting a new one.
@@ -140,19 +237,24 @@ pub fn run() {
                 let history_clone = game_hashes.clone();
                 let flag_clone = stop_flag.clone();
                 let params = eval_params;
+                let sparams = search_params;
+                let out_thread = out.clone();
                 let handle = std::thread::spawn(move || {
-                    let info = search_parallel(&board_clone, &history_clone, &limits, &tt_clone, threads, flag_clone, params);
-                    let stdout = std::io::stdout();
-                    let mut out = stdout.lock();
+                    let info = search_parallel(
+                        &board_clone,
+                        &history_clone,
+                        &limits,
+                        &tt_clone,
+                        threads,
+                        flag_clone,
+                        params,
+                        sparams,
+                        out_thread.clone(),
+                    );
                     match info.best_move {
-                        Some(m) => {
-                            let _ = writeln!(out, "bestmove {}", m.to_uci());
-                        }
-                        None => {
-                            let _ = writeln!(out, "bestmove (none)");
-                        }
+                        Some(m) => out_thread.line(&format!("bestmove {}", m.to_uci())),
+                        None => out_thread.line("bestmove (none)"),
                     }
-                    let _ = out.flush();
                 });
                 search_handle = Some(handle);
             }
@@ -165,25 +267,22 @@ pub fn run() {
             }
             // ---- debug / test commands (not part of the UCI spec) ----
             "d" => {
-                let _ = writeln!(out, "{}", board.to_fen());
-                let _ = out.flush();
+                out.line(&board.to_fen());
             }
             "eval" => {
                 let s = evaluate_with(&board, &eval_params);
-                let _ = writeln!(out, "eval {}", s);
-                let _ = out.flush();
+                out.line(&format!("eval {s}"));
             }
             "perft" => {
                 // `perft <depth>`
-                let depth: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(3);
+                let depth: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(3).min(8);
                 let mut b = board.clone();
                 let n = b.perft(depth);
-                let _ = writeln!(out, "perft {} nodes {}", depth, n);
-                let _ = out.flush();
+                out.line(&format!("perft {depth} nodes {n}"));
             }
             "divide" => {
                 // `divide <depth>`: per-move counts (textbook divide).
-                let depth: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                let depth: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, 8);
                 let mut b = board.clone();
                 let moves = b.generate_legal_moves();
                 let mut total = 0u64;
@@ -192,10 +291,9 @@ pub fn run() {
                     let n = b.perft(depth - 1);
                     b.unmake_move();
                     total += n;
-                    let _ = writeln!(out, "{} {}", m.to_uci(), n);
+                    out.line(&format!("{} {}", m.to_uci(), n));
                 }
-                let _ = writeln!(out, "total {}", total);
-                let _ = out.flush();
+                out.line(&format!("total {total}"));
             }
             _ => {
                 // Ignore unknown commands (e.g. `debug`, `ponderhit`).
@@ -213,47 +311,45 @@ pub fn run() {
 fn stop_and_join(search_handle: &mut Option<std::thread::JoinHandle<()>>, stop_flag: &mut Arc<AtomicBool>) {
     stop_flag.store(true, Ordering::Relaxed);
     if let Some(h) = search_handle.take() {
+        // A panicking search must not take the server down: the thread
+        // unwinds, the join result is ignored and the loop continues.
         let _ = h.join();
     }
     *stop_flag = Arc::new(AtomicBool::new(false));
 }
 
-fn parse_position(cmd: &str, game_hashes: &mut Vec<u64>) -> Board {
-    game_hashes.clear();
+fn parse_position(cmd: &str) -> Result<(Board, Vec<u64>), String> {
+    let mut game_hashes: Vec<u64> = Vec::new();
     // Forms:
     //   position startpos [moves ...]
     //   position fen <fen fields...> [moves ...]
     let parts = cmd.splitn(3, ' ').collect::<Vec<_>>();
     if parts.len() < 2 {
-        return Board::startpos();
+        return Ok((Board::startpos(), vec![Board::startpos().hash]));
     }
     let mut board: Board;
-    let moves_start;
     if parts.get(1).copied() == Some("startpos") {
         board = Board::startpos();
-        moves_start = 2;
     } else if parts.get(1).copied() == Some("fen") {
-        // FEN is everything until ` moves`.
         let rest = parts.get(2).copied().unwrap_or("");
         let (fen, moves_part) = match rest.rfind(" moves") {
             Some(i) => (&rest[..i], Some(&rest[i + 6..])),
             None => (rest, None),
         };
-        board = Board::from_fen(fen).unwrap_or_else(|_| Board::startpos());
+        board = Board::from_fen_strict(fen)?;
         game_hashes.push(board.hash);
-        // Apply moves (if any) by looping over tokens after `moves`.
         if let Some(moves_str) = moves_part {
             for tok in moves_str.split_whitespace() {
-                apply_uci_move(&mut board, tok, game_hashes);
+                apply_uci_move(&mut board, tok, &mut game_hashes)?;
             }
         }
-        return board;
+        return Ok((board, game_hashes));
     } else {
-        return Board::startpos();
+        return Ok((Board::startpos(), vec![Board::startpos().hash]));
     }
     // startpos + moves
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    for tok in tokens.iter().skip(moves_start) {
+    for tok in tokens.iter().skip(2) {
         // Skip the literal "moves".
         if *tok == "moves" {
             continue;
@@ -261,16 +357,20 @@ fn parse_position(cmd: &str, game_hashes: &mut Vec<u64>) -> Board {
         if tok.len() < 4 {
             continue;
         }
-        apply_uci_move(&mut board, tok, game_hashes);
+        apply_uci_move(&mut board, tok, &mut game_hashes)?;
     }
     game_hashes.push(board.hash);
-    board
+    Ok((board, game_hashes))
 }
 
-fn apply_uci_move(board: &mut Board, tok: &str, game_hashes: &mut Vec<u64>) {
-    if let Some(m) = board.find_legal(tok) {
-        board.make_move(&m);
-        game_hashes.push(board.hash);
+fn apply_uci_move(board: &mut Board, tok: &str, game_hashes: &mut Vec<u64>) -> Result<(), String> {
+    match board.find_legal(tok) {
+        Some(m) => {
+            board.make_move(&m);
+            game_hashes.push(board.hash);
+            Ok(())
+        }
+        None => Err(format!("illegal move '{tok}'")),
     }
 }
 
@@ -336,7 +436,8 @@ fn parse_go(cmd: &str, board: &Board) -> SearchLimits {
 }
 
 /// Run the search, using multiple threads on Gamma (`threads` feature).
-fn search_parallel(
+#[allow(clippy::too_many_arguments)]
+fn search_parallel<W: Write + Send + 'static>(
     board: &Board,
     game_history: &[u64],
     limits: &SearchLimits,
@@ -344,6 +445,8 @@ fn search_parallel(
     threads: usize,
     stop: Arc<AtomicBool>,
     params: EvalParams,
+    sparams: SearchParams,
+    out: Output<W>,
 ) -> SearchInfo {
     #[cfg(not(feature = "threads"))]
     let _ = threads;
@@ -361,15 +464,10 @@ fn search_parallel(
             let limits_main = limits.clone();
             let main_handle = std::thread::spawn(move || {
                 let mut b = board_main;
-                let mut s = Searcher::with_params(tt_main, params);
-                let printer = |msg: String| {
-                    let stdout = std::io::stdout();
-                    let mut out = stdout.lock();
-                    let _ = writeln!(out, "{msg}");
-                    let _ = out.flush();
-                };
-                // Need to share info output from the main thread only.
-                s.search(&mut b, &history_main, &limits_main, Some(flag_main), &printer)
+                let mut s = Searcher::with_settings(tt_main, params, sparams);
+                s.search(&mut b, &history_main, &limits_main, Some(flag_main), &|msg: String| {
+                    out.line(&msg);
+                })
             });
             // Helpers: same budget as the main thread, slightly shallower.
             for h in 0..(threads - 1) {
@@ -387,23 +485,31 @@ fn search_parallel(
                 // exits at the next `should_stop` check once `stop` fires.
                 let _ = std::thread::spawn(move || {
                     let mut bb = b;
-                    let mut s = Searcher::with_params(tt_h, params);
+                    let mut s = Searcher::with_settings(tt_h, params, sparams);
                     let _ = s.search(&mut bb, &hist_h, &lim, Some(flag_h), &|_| {});
                 });
             }
-            let result = main_handle.join().expect("main search thread panicked");
+            let result = main_handle.join().unwrap_or_else(|_| {
+                // The main search panicked: return a safe empty result
+                // instead of propagating the panic into the server thread.
+                SearchInfo {
+                    best_move: None,
+                    score: 0,
+                    depth: 0,
+                    nodes: 0,
+                    time_ms: 0,
+                    pv: Vec::new(),
+                }
+            });
             // Wind helpers down promptly; they share `stop` (checked every
-            // 2048 nodes) and the shared TT, so abandoning them is safe.
+            // 512 nodes) and the shared TT, so abandoning them is safe.
             stop.store(true, Ordering::Relaxed);
             return result;
         }
     }
     let mut b = board.clone();
-    let mut s = Searcher::with_params(tt.clone(), params);
+    let mut s = Searcher::with_settings(tt.clone(), params, sparams);
     s.search(&mut b, game_history, limits, Some(stop), &|msg: String| {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let _ = writeln!(out, "{msg}");
-        let _ = out.flush();
+        out.line(&msg);
     })
 }

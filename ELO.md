@@ -491,8 +491,10 @@ interval, but the direction agrees with 2600 paired games in-process).
 
 Gamma was swept again and stayed put: `pressure_scale=24,trap_bonus=12,
 king_danger=6` measured −2 (CI −22..+17) over 1200 games; `king_danger=3`
-−2. The `fast_legality` speed optimisation (node-identical tree, ~3% nps)
-measured −2 (CI −36..+32) over 400 fixed-clock games and was reverted.
+−2; a stronger pawn shield (`shield_pawn=20,shield_missing=14`) gave +18
+(CI −2..+38) then −13 (CI −33..+6) in two independent 1200-game runs, i.e.
+neutral. The `fast_legality` speed optimisation (node-identical tree, ~3%
+nps) measured −2 (CI −36..+32) over 400 fixed-clock games and was reverted.
 Gamma remains at its trained ~1930 vs the SF 2000 anchor.
 
 Bench: Gamma d8 unchanged **18777**; Alpha d8 272511 → **216764** (the new

@@ -731,12 +731,11 @@ fn evaluate_color(board: &Board, color: Color, pressure: &Pressure, p: &EvalPara
         + (popcount(board.pieces[base + 3]) as i32) * 2
         + (popcount(board.pieces[base + 4]) as i32) * 4;
     let bishop_count = popcount(board.pieces[color.idx() * 6 + 2]) as i32;
-    let own = color_bitboard(board, color);
 
     // --- positional features (applied evenly to the MG score; they taper
     // naturally because the endgame score dominates late).
     let mut bonus = 0i32;
-    bonus += mobility(board, color, own, p);
+    bonus += pressure.mobility[color.idx()];
     bonus += pawn_structure(board, color, p);
     bonus += rook_files(board, color, p);
     bonus += king_safety(board, color, p);
@@ -770,39 +769,6 @@ fn color_bitboard(board: &Board, color: Color) -> Bitboard {
         | board.pieces[base + 3]
         | board.pieces[base + 4]
         | board.pieces[base + 5]
-}
-
-#[cfg(feature = "advanced-eval")]
-fn mobility(board: &Board, color: Color, own: Bitboard, p: &EvalParams) -> i32 {
-    let mut mob = 0i32;
-    let occ = board.occupied;
-    let mut b = board.pieces[color.idx() * 6 + 1];
-    while b != 0 {
-        let (sq, rest) = pop_lsb(b);
-        b = rest;
-        mob += (popcount(knight_attacks(sq) & !own) as i32) * p.mob_knight;
-    }
-    b = board.pieces[color.idx() * 6 + 2];
-    while b != 0 {
-        let (sq, rest) = pop_lsb(b);
-        b = rest;
-        mob += (popcount(bishop_attacks(sq, occ) & !own) as i32) * p.mob_bishop;
-    }
-    b = board.pieces[color.idx() * 6 + 3];
-    while b != 0 {
-        let (sq, rest) = pop_lsb(b);
-        b = rest;
-        mob += (popcount(rook_attacks(sq, occ) & !own) as i32) * p.mob_rook;
-    }
-    b = board.pieces[color.idx() * 6 + 4];
-    while b != 0 {
-        let (sq, rest) = pop_lsb(b);
-        b = rest;
-        mob += popcount(queen_attacks(sq, occ) & !own) as i32 * p.mob_queen;
-    }
-    // Include enemy pieces in mobility targets is fine (attacks count);
-    // captures are tactics anyway. Small net effect either way.
-    mob
 }
 
 #[cfg(feature = "advanced-eval")]
@@ -983,6 +949,9 @@ struct Pressure {
     trapped: [i32; 2],
     /// `king_ring[attacker]` = attacker's pieces hitting the enemy king ring.
     king_ring: [i32; 2],
+    /// Weighted mobility per colour, accumulated from the same attack sets
+    /// the scan already computes (avoids a second pass in `mobility`).
+    mobility: [i32; 2],
 }
 
 impl Pressure {
@@ -993,7 +962,11 @@ impl Pressure {
         let need_loose = p.pressure_scale != 0 || p.alpha_own_loose != 0;
         let need_trapped = p.trap_bonus != 0;
         let need_ring = p.king_pressure != 0 || p.king_danger != 0;
-        if !(need_loose || need_trapped || need_ring) {
+        let need_mobility = p.mob_knight != 0
+            || p.mob_bishop != 0
+            || p.mob_rook != 0
+            || p.mob_queen != 0;
+        if !(need_loose || need_trapped || need_ring || need_mobility) {
             return out;
         }
         let occ = board.occupied;
@@ -1049,7 +1022,16 @@ impl Pressure {
                         3 => rook_attacks(sq, occ),
                         _ => queen_attacks(sq, occ),
                     };
-                    let safe_squares = popcount(attacks & !own_bb);
+                    let safe_squares = popcount(attacks & !own_bb) as i32;
+                    let mob_w = match k {
+                        1 => p.mob_knight,
+                        2 => p.mob_bishop,
+                        3 => p.mob_rook,
+                        _ => p.mob_queen,
+                    };
+                    if mob_w != 0 {
+                        out.mobility[owner.idx()] += safe_squares * mob_w;
+                    }
                     if need_trapped && k <= 3 && safe_squares <= 1 {
                         out.trapped[owner.idx()] += 1;
                     }

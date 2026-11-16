@@ -14,7 +14,8 @@ feature.
 
 `README.md` has the module map; `ELO.md` is the measured-strength log;
 `docs/variant-styles.md` explains the eval/playstyle differences;
-`docs/training.md` describes the in-process trainer and training workflow.
+`docs/training.md` describes the in-process trainer and training workflow;
+`docs/speed.md` records search-speed benchmarks against Stockfish 19.
 No CI exists: verification is local.
 
 ## Build, test, lint
@@ -86,6 +87,18 @@ cargo clippy --all-targets -- -D warnings     # currently clean
   concurrent handles). `tools/embed_demo.py` loads the built DLL/SO.
 - On Windows, Cargo warns that the bin and lib both produce `ferrum.pdb`;
   this is a known benign collision (Linux/macOS are unaffected).
+
+## Speed workflow
+
+- `python tools/speed.py --engine <exe> --compare stockfish.exe --nodes 5000000`
+  is the canonical benchmark: identical node counts, interleaved engines,
+  wall-clock time. Never compare NPS from separate, non-interleaved runs.
+- Speed changes must stay node-identical (`cargo run --release --example bench`
+  keeps Gamma d8 at 18777 and Alpha d8 at 216764). If the tree changes, A/B
+  strength in-process before keeping it.
+- The default build is portable; `RUSTFLAGS="-C target-cpu=native"` is the
+  recommended server/benchmark build (the Dockerfile defaults to it).
+- Record new numbers in `docs/speed.md`, not in `ELO.md`.
 
 ## Strength / gauntlet workflow
 

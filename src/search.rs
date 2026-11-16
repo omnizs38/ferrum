@@ -303,8 +303,7 @@ impl Searcher {
             {
                 let elapsed = start.elapsed().as_millis().max(1) as u64;
                 let nps = (self.nodes * 1000) / elapsed;
-                let pv_moves = self.extract_pv();
-                best_pv = pv_moves.clone();
+                let pv_moves = self.extract_pv();                best_pv = pv_moves.clone();
                 let mut pv_str = String::new();
                 for m in pv_moves.iter() {
                     if !pv_str.is_empty() {
@@ -319,9 +318,9 @@ impl Searcher {
                     format!("cp {}", best_score)
                 };
                 let info = if pv_str.is_empty() {
-                    format!("info depth {} score {} nodes {} nps {}", completed_depth, score_str, self.nodes, nps)
+                    format!("info depth {} score {} nodes {} nps {} time {}", completed_depth, score_str, self.nodes, nps, elapsed)
                 } else {
-                    format!("info depth {} score {} nodes {} nps {} pv {}", completed_depth, score_str, self.nodes, nps, pv_str)
+                    format!("info depth {} score {} nodes {} nps {} time {} pv {}", completed_depth, score_str, self.nodes, nps, elapsed, pv_str)
                 };
                 on_info(info);
             }
@@ -536,7 +535,7 @@ impl Searcher {
                 board.side = board.side.other();
                 board.ep_square = None;
                 board.halfmove += 1;
-                board.hash = board.compute_hash();
+                board.hash = board.null_move_hash();
                 self.path_hashes.push(board.hash);
                 let r = self.sparams.null_r_base
                     + depth / self.sparams.null_r_div.max(1);
@@ -834,10 +833,23 @@ impl Searcher {
         if n <= 1 {
             return;
         }
-        // Score into a stack array that is only initialised on write (no
-        // 1 KiB memset per node), then insertion-sort the live slice by
-        // descending score.
         let mut scores = [std::mem::MaybeUninit::<i32>::uninit(); crate::types::MAX_MOVES];
+        self.score_moves(board, moves, tt_move, ply, &mut scores[..n]);
+        // SAFETY: exactly `n` scores were written above.
+        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
+        sort_moves_by_score(moves, scores);
+    }
+
+    /// Score every generated move into `scores` (same order as `moves`).
+    /// The caller picks the next move lazily, so cut nodes avoid sorting.
+    fn score_moves(
+        &self,
+        board: &Board,
+        moves: &crate::types::MoveList,
+        tt_move: Option<Move>,
+        ply: usize,
+        scores: &mut [std::mem::MaybeUninit<i32>],
+    ) {
         for (i, m) in moves.as_slice().iter().enumerate() {
             let s = if Some(*m) == tt_move {
                 10_000_000
@@ -857,10 +869,6 @@ impl Searcher {
             };
             scores[i].write(s);
         }
-        // SAFETY: exactly `n` scores were written above, and the sort only
-        // reads indices below `n`.
-        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
-        sort_moves_by_score(moves, scores);
     }
 
     fn order_captures(&self, board: &Board, moves: &mut crate::types::MoveList, _ply: usize) {

@@ -126,6 +126,33 @@ cargo run --release --example train -- \
 python tools/train.py --variant gamma --mode spsa --iters 24 --games 200
 ```
 
+## Speed
+
+`tools/speed.py` compares search throughput against another UCI engine with
+a fixed node budget (identical work, time is the metric), interleaving the
+engines so CPU drift cancels:
+
+```sh
+cargo build --release
+python tools/speed.py --engine target/release/ferrum.exe \
+  --compare stockfish.exe --nodes 5000000
+```
+
+Measured 2026-11-16, 1 thread, 64 MB hash, 5M nodes per position: Gamma
+**1.63x** and Alpha **1.53x** faster than Stockfish 19 in NPS in the
+portable build; **1.82x / 1.81x** with `-C target-cpu=native` (3.1–3.2 s
+vs 5.7 s for the same 5M nodes). Details, method and the depth caveat:
+[`docs/speed.md`](docs/speed.md).
+
+For a server or benchmark build, compile on the target machine:
+
+```sh
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features
+```
+
+The changes are node-identical (bench unchanged), so strength is unaffected.
+
 ## Design overview
 
 ```
@@ -216,6 +243,7 @@ need NumPy):
 | `gauntlet.py` | UCI match harness — plays paired games against another engine or a Stockfish anchor, writes `results/*.json` |
 | `train.py` | Training driver — builds `examples/train` for a variant, runs SPSA over `EvalParams`, then a targeted style search; writes `training/*.json` |
 | `embed_demo.py` | Loads the built shared library via `ctypes` and runs an in-process search (server/bot smoke test) |
+| `speed.py` | Interleaved NPS comparison against another UCI engine (fixed nodes or fixed clock) |
 | `verify_mates.py` | Re-checks mate claims with Ferrum itself (`perft 1 == 0` + mate score) |
 | `session_summary.py` | Tabulates every gauntlet JSON in `results/` into one session table |
 | `probe_fen.py` | Asks an engine for its best move on a FEN (`go depth N`) |

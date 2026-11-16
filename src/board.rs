@@ -100,6 +100,12 @@ pub struct Undo {
     pub hash: u64,
     pub moved_piece: Piece,
     pub flags: Move,
+    /// Incremental material+PST scores before the move (Gamma only), so
+    /// unmake can restore them instead of recomputing every PST lookup.
+    #[cfg(feature = "advanced-eval")]
+    pub mg: [i32; 2],
+    #[cfg(feature = "advanced-eval")]
+    pub eg: [i32; 2],
 }
 
 impl Board {
@@ -144,6 +150,18 @@ impl Board {
     }
 
     fn put_piece(&mut self, sq: u8, piece: Piece) {
+        self.put_piece_impl(sq, piece, true);
+    }
+
+    /// `put_piece` without touching the incremental scores (used by unmake,
+    /// which restores them from the undo entry).
+    fn put_piece_restore(&mut self, sq: u8, piece: Piece) {
+        self.put_piece_impl(sq, piece, false);
+    }
+
+    fn put_piece_impl(&mut self, sq: u8, piece: Piece, scores: bool) {
+        #[cfg(not(feature = "advanced-eval"))]
+        let _ = scores;
         let i = Self::slot(piece.color, piece.kind);
         self.pieces[i] |= bit(sq);
         self.occupied |= bit(sq);
@@ -152,7 +170,7 @@ impl Board {
             self.king_sq[piece.color.idx()] = sq;
         }
         #[cfg(feature = "advanced-eval")]
-        {
+        if scores {
             let (mg, eg) = crate::eval::material_pst(piece.color, piece.kind.idx(), sq);
             self.mg_scores[piece.color.idx()] += mg;
             self.eg_scores[piece.color.idx()] += eg;
@@ -190,6 +208,18 @@ impl Board {
             h ^= z.ep_file[file_of(ep) as usize];
         }
         h
+    }
+
+    /// Hash of the position after a null move (side flipped, en passant
+    /// cleared), computed incrementally. Search uses this instead of the
+    /// O(64) [`Board::compute_hash`] in every null-move node.
+    pub fn null_move_hash(&self) -> u64 {
+        let z = zobrist();
+        let mut h = self.hash;
+        if let Some(ep) = self.ep_square {
+            h ^= z.ep_file[file_of(ep) as usize];
+        }
+        h ^ z.side
     }
 
     // ------------------------------------------------------------ FEN I/O
@@ -372,6 +402,10 @@ impl Board {
             hash: prev_hash,
             moved_piece: piece,
             flags: *mv,
+            #[cfg(feature = "advanced-eval")]
+            mg: self.mg_scores,
+            #[cfg(feature = "advanced-eval")]
+            eg: self.eg_scores,
         };
 
         // Old EP file leaves the hash.
@@ -469,8 +503,8 @@ impl Board {
         let piece = u.moved_piece;
         // Remove the placed piece (promoted) and put back the original.
         let cur = self.mailbox[mv.to as usize].unwrap();
-        self.remove_from(mv.to, cur);
-        self.put_piece(mv.from, piece);
+        self.remove_from_restore(mv.to, cur);
+        self.put_piece_restore(mv.from, piece);
         if piece.kind == PieceType::King {
             self.king_sq[piece.color.idx()] = mv.from;
         }
@@ -479,28 +513,47 @@ impl Board {
         if mv.is_castle_k || mv.is_castle_q {
             let (rook_from, rook_to) = Self::castle_rook_squares(piece.color, mv.is_castle_k);
             let rook = self.mailbox[rook_to as usize].unwrap();
-            self.remove_from(rook_to, rook);
-            self.put_piece(rook_from, rook);
+            self.remove_from_restore(rook_to, rook);
+            self.put_piece_restore(rook_from, rook);
         }
 
         // Restore the captured piece.
         if let Some(cap) = u.captured {
             if mv.is_en_passant {
                 let cap_sq = if cap.color == Color::White { mv.to + 8 } else { mv.to - 8 };
-                self.put_piece(cap_sq, cap);
+                self.put_piece_restore(cap_sq, cap);
             } else {
-                self.put_piece(mv.to, cap);
+                self.put_piece_restore(mv.to, cap);
             }
+        }
+
+        // The incremental material+PST scores are exactly the ones saved
+        // before the move; no PST lookups were done above.
+        #[cfg(feature = "advanced-eval")]
+        {
+            self.mg_scores = u.mg;
+            self.eg_scores = u.eg;
         }
     }
 
     fn remove_from(&mut self, sq: u8, piece: Piece) {
+        self.remove_from_impl(sq, piece, true);
+    }
+
+    /// `remove_from` without touching the incremental scores.
+    fn remove_from_restore(&mut self, sq: u8, piece: Piece) {
+        self.remove_from_impl(sq, piece, false);
+    }
+
+    fn remove_from_impl(&mut self, sq: u8, piece: Piece, scores: bool) {
+        #[cfg(not(feature = "advanced-eval"))]
+        let _ = scores;
         let i = Self::slot(piece.color, piece.kind);
         self.pieces[i] &= !bit(sq);
         self.occupied &= !bit(sq);
         self.mailbox[sq as usize] = None;
         #[cfg(feature = "advanced-eval")]
-        {
+        if scores {
             let (mg, eg) = crate::eval::material_pst(piece.color, piece.kind.idx(), sq);
             self.mg_scores[piece.color.idx()] -= mg;
             self.eg_scores[piece.color.idx()] -= eg;
@@ -874,6 +927,22 @@ mod tests {
         // king-less fixtures used by evaluation unit tests.
         assert!(Board::from_fen_strict("k7/8/8/8/8/8/8/K7 w - - 0 1").is_ok());
         assert!(Board::from_fen("4r3/8/8/8/r3N3/8/8/K7 b - - 0 1").is_ok());
+    }
+
+    #[test]
+    fn null_move_hash_matches_flipped_position() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 0 1",
+        ] {
+            let b = Board::from_fen(fen).unwrap();
+            let incremental = b.null_move_hash();
+            let mut flipped = b.clone();
+            flipped.side = flipped.side.other();
+            flipped.ep_square = None;
+            assert_eq!(incremental, flipped.compute_hash(), "{fen}");
+        }
     }
 
     #[test]

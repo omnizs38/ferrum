@@ -14,7 +14,10 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 ARG CARGO_FLAGS=""
-RUN cargo build --release ${CARGO_FLAGS}
+# Build for the deployment host's CPU (safe inside the image being built).
+# Pass --build-arg FERRUM_RUSTFLAGS= for a portable binary.
+ARG FERRUM_RUSTFLAGS="-C target-cpu=native"
+RUN RUSTFLAGS="${FERRUM_RUSTFLAGS}" cargo build --release ${CARGO_FLAGS}
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --create-home ferrum

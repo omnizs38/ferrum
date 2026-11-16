@@ -160,8 +160,8 @@ For lower-level control, use `ferrum::search::Searcher` directly.
 ## Deployment
 
 ```sh
-# Linux binary + shared library
-cargo build --release
+# Linux binary + shared library (native codegen for this host)
+RUSTFLAGS="-C target-cpu=native" cargo build --release
 ./target/release/ferrum --version
 python tools/embed_demo.py            # loads libferrum.so and searches
 
@@ -171,10 +171,17 @@ docker run -i --rm ferrum             # UCI over stdio
 docker run --rm -e FERRUM_HASH_MB=16 ferrum --version
 ```
 
-The Dockerfile builds Gamma by default. For Alpha use
-`--build-arg CARGO_FLAGS=--no-default-features`. For a musl/scratch image,
-cross-compile with `--target x86_64-unknown-linux-musl` and copy the static
-binary (`rustup target add x86_64-unknown-linux-musl` plus a musl linker).
+The Dockerfile builds with `-C target-cpu=native` by default (the image is
+compiled on the machine that will run it); pass
+`--build-arg FERRUM_RUSTFLAGS=` for a portable image. The default
+`cargo build --release` remains portable and, per `docs/speed.md`, is
+already ~1.5–1.6x faster than Stockfish 19 in NPS; the native build pushes
+that to ~1.8x.
+
+For Alpha use `--build-arg CARGO_FLAGS=--no-default-features`. For a
+musl/scratch image, cross-compile with
+`--target x86_64-unknown-linux-musl` and copy the static binary
+(`rustup target add x86_64-unknown-linux-musl` plus a musl linker).
 
 ### CLI flags for service wrappers
 

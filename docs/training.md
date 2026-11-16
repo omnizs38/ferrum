@@ -18,7 +18,7 @@ measurements at 300 ms are ≈1870 (Alpha) and ≈1930 (Gamma).
 
 ### 1. Trainable weights (`src/eval.rs`, `src/search.rs`)
 
-Every positional weight is a field of `eval::EvalParams` (29 knobs) and every
+Every positional weight is a field of `eval::EvalParams` (34 knobs) and every
 optional pruning/limit is a field of `search::SearchParams` (12 knobs). The
 `DEFAULT` constants are the trained baseline; a spec string overrides them:
 
@@ -98,6 +98,7 @@ The largest gains came from search, not eval, and the two were coupled:
 | quiescence *on top* of prunings | Alpha | +98 Elo at 50 ms (200 g) |
 | quiescence *without* prunings | Alpha | **−262 Elo** (cost too much depth) |
 | own-loose penalty 24 + tempo | Alpha | +47 Elo at 80k nodes (400 g) |
+| mobility 3/2 + passed pawns + bishop pair | Alpha | **+31 Elo at 20k (2000 g), +70 at 80k (600 g)** |
 | trapping trio | Gamma | +41 Elo at 20k (600 g), +15 at 80k |
 | bishop pair 30 → 40 | Gamma | +30 Elo at 20k (600 g), +15 at 80k (400 g) |
 | castled-king bonus | Alpha | strength-neutral; defensive metric improved |
@@ -138,8 +139,8 @@ Raw game JSON is git-ignored; the summary tables live in `ELO.md`.
   games, so treat SPSA as a starting point, not a finished eval tune.
 * The long-term goals (2000 / 3500) need more than this harness: a learned
   or heavily tuned eval, faster movegen, and far larger training budgets.
-* The 2026-11-16 sweep (fail-soft qsearch, 2-way TT, LMR log formula,
+* The 2026-11-16 search sweep (fail-soft qsearch, 2-way TT, LMR log formula,
   null-move R, aspiration window, mobility weights, IID) found no change
-  that cleared the keep bar; they are recorded in `ELO.md`. Treat the
-  current defaults as a local optimum at 600 games per candidate, not as
-  the global optimum.
+  that cleared the keep bar. The later Alpha eval pass (mobility + passed
+  pawns + bishop pair) did: +31 Elo over 2000 games, +70 at 80k. Defaults
+  are a local optimum for the tested search knobs, not globally.

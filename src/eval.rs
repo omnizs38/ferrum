@@ -236,6 +236,8 @@ pub struct EvalParams {
     /// Good-trapping term: bonus per attack by our pieces on the enemy
     /// king's ring (king square + its neighbours).
     pub king_pressure: i32,
+    /// Defensive king safety: penalty per enemy attack on our own king ring.
+    pub king_danger: i32,
     // --- Alpha simple evaluation style terms ---
     /// Defensive: cp per own pawn in the three squares in front of the king.
     pub alpha_shield: i32,
@@ -245,6 +247,14 @@ pub struct EvalParams {
     pub alpha_king_danger: i32,
     /// Defensive: penalty as a percent of our own loose material.
     pub alpha_own_loose: i32,
+    /// Alpha's cheap mobility (cp per attacked non-own square).
+    pub alpha_mob_knight: i32,
+    pub alpha_mob_bishop: i32,
+    /// Alpha's bishop-pair bonus (0 = off).
+    pub alpha_bishop_pair: i32,
+    /// Alpha's passed-pawn bonus as a percent of the shared rank table
+    /// (0 = off, 100 = full table).
+    pub alpha_passed: i32,
     // --- Alpha simple-evaluation material ---
     pub alpha_pawn: i32,
     pub alpha_knight: i32,
@@ -274,6 +284,11 @@ impl EvalParams {
     ///   is strength-neutral (−5, CI −33..+23) and moves the defensive
     ///   king-ring metric the right way (3.21 vs 3.39), so it is kept for
     ///   Alpha's identity.
+    /// * 2026-11-16 Alpha pass: knight/bishop mobility (3/2), passed pawns
+    ///   (full shared table) and bishop pair (30) measured **+31 Elo**
+    ///   (CI +16..+47) over 2000 paired games at 20k nodes/move; the
+    ///   individual terms were +16/+17/+9. This closes most of Alpha's
+    ///   remaining evaluation gap without giving it Gamma's tapered eval.
     ///
     /// Gamma's search prunings (the larger gain) are in
     /// `SearchParams::DEFAULT`, not here.
@@ -297,10 +312,15 @@ impl EvalParams {
         pressure_scale: 16,
         trap_bonus: 8,
         king_pressure: 3,
+        king_danger: 0,
         alpha_shield: 8,
         alpha_castle: 20,
         alpha_king_danger: 0,
         alpha_own_loose: 24,
+        alpha_mob_knight: 3,
+        alpha_mob_bishop: 2,
+        alpha_bishop_pair: 30,
+        alpha_passed: 100,
         alpha_pawn: 100,
         alpha_knight: 320,
         alpha_bishop: 330,
@@ -310,7 +330,7 @@ impl EvalParams {
     };
 
     /// Names in `to_spec` order; also the accepted `from_spec` keys.
-    pub const KEYS: [&'static str; 29] = [
+    pub const KEYS: [&'static str; 34] = [
         "mob_knight",
         "mob_bishop",
         "mob_rook",
@@ -330,10 +350,15 @@ impl EvalParams {
         "pressure_scale",
         "trap_bonus",
         "king_pressure",
+        "king_danger",
         "alpha_shield",
         "alpha_castle",
         "alpha_king_danger",
         "alpha_own_loose",
+        "alpha_mob_knight",
+        "alpha_mob_bishop",
+        "alpha_bishop_pair",
+        "alpha_passed",
         "alpha_pawn",
         "alpha_knight",
         "alpha_bishop",
@@ -365,10 +390,15 @@ impl EvalParams {
             "pressure_scale" => self.pressure_scale = value,
             "trap_bonus" => self.trap_bonus = value,
             "king_pressure" => self.king_pressure = value,
+            "king_danger" => self.king_danger = value,
             "alpha_shield" => self.alpha_shield = value,
             "alpha_castle" => self.alpha_castle = value,
             "alpha_king_danger" => self.alpha_king_danger = value,
             "alpha_own_loose" => self.alpha_own_loose = value,
+            "alpha_mob_knight" => self.alpha_mob_knight = value,
+            "alpha_mob_bishop" => self.alpha_mob_bishop = value,
+            "alpha_bishop_pair" => self.alpha_bishop_pair = value,
+            "alpha_passed" => self.alpha_passed = value,
             "alpha_pawn" => self.alpha_pawn = value,
             "alpha_knight" => self.alpha_knight = value,
             "alpha_bishop" => self.alpha_bishop = value,
@@ -436,10 +466,15 @@ impl EvalParams {
             "pressure_scale" => self.pressure_scale,
             "trap_bonus" => self.trap_bonus,
             "king_pressure" => self.king_pressure,
+            "king_danger" => self.king_danger,
             "alpha_shield" => self.alpha_shield,
             "alpha_castle" => self.alpha_castle,
             "alpha_king_danger" => self.alpha_king_danger,
             "alpha_own_loose" => self.alpha_own_loose,
+            "alpha_mob_knight" => self.alpha_mob_knight,
+            "alpha_mob_bishop" => self.alpha_mob_bishop,
+            "alpha_bishop_pair" => self.alpha_bishop_pair,
+            "alpha_passed" => self.alpha_passed,
             "alpha_pawn" => self.alpha_pawn,
             "alpha_knight" => self.alpha_knight,
             "alpha_bishop" => self.alpha_bishop,
@@ -514,6 +549,13 @@ pub fn evaluate_with(board: &Board, p: &EvalParams) -> i32 {
 #[cfg(not(feature = "advanced-eval"))]
 fn alpha_style(board: &Board, color: Color, p: &EvalParams) -> i32 {
     let mut s = shield_bonus(board, color, p.alpha_shield);
+    s += alpha_mobility(board, color, p);
+    if p.alpha_bishop_pair != 0
+        && popcount(board.pieces[color.idx() * 6 + 2]) >= 2
+    {
+        s += p.alpha_bishop_pair;
+    }
+    s += alpha_passed(board, color, p.alpha_passed);
     if p.alpha_castle != 0 && king_camped(board, color) {
         s += p.alpha_castle;
     }
@@ -526,6 +568,57 @@ fn alpha_style(board: &Board, color: Color, p: &EvalParams) -> i32 {
             .copied()
             .unwrap_or(0);
         s -= loose * p.alpha_own_loose / 100;
+    }
+    s
+}
+
+/// Alpha's cheap mobility: knight and bishop moves that do not land on an
+/// own piece. Off by default, and far cheaper than Gamma's full mobility.
+#[cfg(not(feature = "advanced-eval"))]
+fn alpha_mobility(board: &Board, color: Color, p: &EvalParams) -> i32 {
+    if p.alpha_mob_knight == 0 && p.alpha_mob_bishop == 0 {
+        return 0;
+    }
+    let base = color.idx() * 6;
+    let own = color_bitboard(board, color);
+    let occ = board.occupied;
+    let mut s = 0;
+    let mut knights = board.pieces[base + 1];
+    while knights != 0 {
+        let (sq, rest) = pop_lsb(knights);
+        knights = rest;
+        s += popcount(knight_attacks(sq) & !own) as i32 * p.alpha_mob_knight;
+    }
+    let mut bishops = board.pieces[base + 2];
+    while bishops != 0 {
+        let (sq, rest) = pop_lsb(bishops);
+        bishops = rest;
+        s += popcount(bishop_attacks(sq, occ) & !own) as i32 * p.alpha_mob_bishop;
+    }
+    s
+}
+
+/// Alpha's passed-pawn bonus (a percent of the shared rank table): cheap
+/// because it is one precomputed mask AND per pawn.
+#[cfg(not(feature = "advanced-eval"))]
+fn alpha_passed(board: &Board, color: Color, scale: i32) -> i32 {
+    if scale == 0 {
+        return 0;
+    }
+    const TABLE: [i32; 8] = [0, 0, 5, 10, 20, 35, 60, 0];
+    let enemy_pawns = board.pieces[color.other().idx() * 6];
+    let mut pawns = board.pieces[color.idx() * 6];
+    let mut s = 0;
+    while pawns != 0 {
+        let (sq, rest) = pop_lsb(pawns);
+        pawns = rest;
+        if enemy_pawns & passed_pawn_mask(sq, color) == 0 {
+            let rank = match color {
+                Color::White => rank_of(sq),
+                Color::Black => 7 - rank_of(sq),
+            };
+            s += TABLE[rank as usize] * scale / 100;
+        }
     }
     s
 }
@@ -656,6 +749,9 @@ fn evaluate_color(board: &Board, color: Color, pressure: &Pressure, p: &EvalPara
     }
     if p.king_pressure != 0 {
         bonus += pressure.king_ring[color.idx()] * p.king_pressure;
+    }
+    if p.king_danger != 0 {
+        bonus -= pressure.king_ring[color.other().idx()] * p.king_danger;
     }
     if bishop_count >= 2 {
         bonus += p.bishop_pair;
@@ -896,7 +992,7 @@ impl Pressure {
         let mut out = Pressure::default();
         let need_loose = p.pressure_scale != 0 || p.alpha_own_loose != 0;
         let need_trapped = p.trap_bonus != 0;
-        let need_ring = p.king_pressure != 0;
+        let need_ring = p.king_pressure != 0 || p.king_danger != 0;
         if !(need_loose || need_trapped || need_ring) {
             return out;
         }

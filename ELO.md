@@ -326,7 +326,7 @@ requested styles — Alpha defensive (long-term goal 2000), Gamma trapping
 (long-term goal 3500). What was built and measured:
 
 1. **Trainable engine surface.** All positional weights are now
-   `eval::EvalParams` (29 knobs) and the prunings are
+   `eval::EvalParams` (34 knobs) and the prunings are
    `search::SearchParams` (12 knobs). `examples/train.rs` plays A-vs-B games
    entirely in-process (paired openings, colours swapped, fixed node budget
    or clock, style metrics), and `tools/train.py` drives SPSA over the
@@ -464,6 +464,39 @@ training surface now exposes 12 search knobs (`null_r_base`, `null_r_div`,
 `asp_delta`, `iid_min_depth` added) for future runs with larger samples.
 Gamma bench d8 is unchanged at **18777 nodes**; both variants' benches and
 the tactics suite are unchanged.
+
+### 2026-11-16 (later) — Alpha eval pass: a measurable gain
+
+The sweep above was all search/weight micro-tuning. This pass added three
+cheap, classical terms to Alpha's lightweight evaluation and found a clear,
+repeatable win at two time controls:
+
+| Candidate (1500 paired games @20k unless noted) | Result | Verdict |
+|---|---|---|
+| knight/bishop mobility 3/2 cp | +16 (CI −2..+34) | kept |
+| passed pawns (full shared rank table) | +17 (CI −0.4..+35) | kept |
+| bishop pair 30 | +9 (CI −8..+27) | kept |
+| **package** | **+31 (CI +16..+47), 2000 games** | **adopted** |
+| package at 80k nodes | **+70 (CI +42..+99), 600 games** | transfer confirmed |
+
+Independent UCI confirmation with fresh binaries:
+
+| Match | Games | TC | Result | Elo |
+|---|---|---|---|---|
+| Alpha new vs Alpha old | 40 | 50 ms | 17–8–15 | +80 [−27,+204] |
+| Alpha new vs SF 2000 | 10 | 300 ms | **6–3–1** | +108 [−104,+496] → ≈2100 |
+
+Alpha's 2000 design goal is **reached in this sample** (10 games is a wide
+interval, but the direction agrees with 2600 paired games in-process).
+
+Gamma was swept again and stayed put: `pressure_scale=24,trap_bonus=12,
+king_danger=6` measured −2 (CI −22..+17) over 1200 games; `king_danger=3`
+−2. The `fast_legality` speed optimisation (node-identical tree, ~3% nps)
+measured −2 (CI −36..+32) over 400 fixed-clock games and was reverted.
+Gamma remains at its trained ~1930 vs the SF 2000 anchor.
+
+Bench: Gamma d8 unchanged **18777**; Alpha d8 272511 → **216764** (the new
+terms change the PV/node count; Alpha still has no null-move/LMR).
 
 **Honest reading:** the training run is a clear strength gain at short and
 medium TC and a clear style gain, but it does **not** reach 2000 for Alpha

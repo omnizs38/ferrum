@@ -3,7 +3,8 @@
 Ferrum is a dependency-free Rust UCI chess engine. One source tree builds two
 variants via Cargo features: **Gamma** (default: threads, qsearch,
 advanced-eval, large-tt) and **Alpha** (`--no-default-features`: single-thread,
-8 MB TT, simple eval). Both variants share quiescence, reverse futility,
+8 MB TT, lightweight eval: material + PST, defensive king/loose terms, cheap
+mobility, passed pawns, bishop pair). Both variants share quiescence, reverse futility,
 late-move pruning and depth-1 futility; the `qsearch` feature now means
 **Gamma's extra aggressive set** (null-move, LMR, razoring, check extensions),
 not quiescence itself. Alpha is Gamma with features removed, so keep shared
@@ -35,7 +36,7 @@ cargo clippy --all-targets -- -D warnings     # currently clean
   Changing stdout, threading or command ordering can break it.
 - Benchmarks must be release builds. `cargo run --release --example bench`
   prints startpos nodes by depth; current Gamma d8 baseline is 18777 nodes
-  (Alpha d8 is 272511: it has a cheaper eval and no null-move/LMR). Report
+  (Alpha d8 is 216764: it has a cheaper eval and no null-move/LMR). Report
   the node delta for search/eval changes, and use `examples/tactics.rs` for
   mate/material sanity checks.
 - Training: `cargo run --release --example train -- --a <spec> --b <spec>`

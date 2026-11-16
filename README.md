@@ -22,7 +22,7 @@ first comes the common core, then the differences.
 | Variant | Build | Threads | Hash (default) |  Quiescence | Evaluation | Design target |
 |---|---|---|---|---|---|---|
 | **Ferrum Gamma** (standard) | `cargo build --release` (default) | Lazy SMP, `Threads` 1–8 | 64 MB, `Hash` 1–4096 | Yes (`qsearch`) + null-move, LMR, RFP, LMP, futility, razoring | Advanced: tapered MG/EG, mobility, pawn structure, bishop pair, rook files, king safety, trapping terms | ~1900–2000 measured at 300 ms; long-term goal 3500 |
-| **Ferrum Alpha** (lightweight) | `cargo build --release --no-default-features` | Single-threaded (`Threads` max 1) | 8 MB | Yes (`qsearch`) + RFP, LMP, futility (no null-move/LMR/razoring) | Simple: material + single PST + defensive king terms | ~1850–1900 measured at 300 ms; goal 2000 |
+| **Ferrum Alpha** (lightweight) | `cargo build --release --no-default-features` | Single-threaded (`Threads` max 1) | 8 MB | Yes (`qsearch`) + RFP, LMP, futility (no null-move/LMR/razoring) | Lightweight: material + PST, defensive king/loose terms, cheap mobility, passed pawns, bishop pair | ~2000 measured at 300 ms (6-3-1 vs SF 2000); goal 2000 |
 
 The name *Alpha* refers to the level, not the stage of development: it is a
 fully-fledged lightweight engine, not a test build. Both variants now share
@@ -144,7 +144,8 @@ src/
               pawns, bishop pair, rook open/semi files, king-safety, and the
               Gamma playstyle terms (loose-material hunting, trapped pieces,
               enemy-king pressure); the simple eval adds Alpha's king-shield,
-              own-loose and tempo terms. Every positional weight lives in
+              own-loose, tempo, cheap N/B mobility, passed-pawn and bishop-pair
+              terms. Every positional weight lives in
               `EvalParams`, which the training harness can override without
               a rebuild (`setoption name EvalParams value ...`).
   tt.rs       Power-of-two transposition table (hash/depth/flag/score/best/
@@ -195,9 +196,10 @@ The two variants deliberately differ in *bias*, not just depth:
   enemy pieces that are attacked more than they are defended, a bonus for
   enemy pieces with no escape squares (trapped), and a bonus for pressing
   the enemy king ring.
-* **Alpha** values king shelter and its own material — the simple eval adds
+* **Alpha** values king shelter and its own material - the simple eval adds
   a king pawn-shield bonus and an own-loose-material penalty (it will not
-  leave pieces hanging), plus a tempo term.
+  leave pieces hanging), plus a tempo term and cheap knight/bishop mobility,
+  passed-pawn and bishop-pair terms.
 
 Both are measured A/B changes, not aspirations; `docs/variant-styles.md`
 has the anatomy, the numbers and the rejected alternatives.
@@ -255,8 +257,13 @@ See `ELO.md` for the gauntlet method and measured estimates
 2026-11-15 training run moved Gamma to ~1930 versus the SF 2000 anchor at
 300 ms (4–6 in 10 games) and Alpha to ~1870 versus the SF 1800 anchor
 (5–3–2 in 10 games), with Alpha gaining ~214 Elo in-process at a fixed
-50 ms clock and Gamma ~73 Elo at 80k nodes/move. The variants' long-term
-goals are 2000 for Alpha and 3500 for Gamma; neither is reached yet.
+50 ms clock and Gamma ~73 Elo at 80k nodes/move. The 2026-11-16 Alpha eval
+pass (mobility, passed pawns, bishop pair) measured **+31 Elo** over 2000
+paired games at 20k nodes and **+70** at 80k, and Alpha then scored
+**6–3–1 against the SF 2000 anchor** at 300 ms (≈2100 by the anchor's
+scale). Gamma remains at ~1930; its style/defence sweeps were neutral.
+The long-term goals are 2000 for Alpha (now reached in the measured sample)
+and 3500 for Gamma (far away).
 Estimates move with TC, Hash and Threads — always use the `--release`
 build, and prefer more games / longer controls over single short matches.
 At `go movetime 1` Ferrum still measures ≈ 1470–1500 vs Stockfish anchors

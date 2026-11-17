@@ -24,6 +24,7 @@
 
 use crate::bitboard::*;
 use crate::board::Board;
+use crate::params::param_accessors;
 use crate::types::Color;
 
 // Material values (MG / EG for the tapered version).
@@ -183,6 +184,10 @@ const PST_EG: [[i32; 64]; 6] = [
     ],
 ];
 
+/// Passed-pawn bonus by rank, from the owning side's point of view.
+/// Alpha scales it by `EvalParams::alpha_passed`; Gamma by `passed_scale`.
+const PASSED_BONUS: [i32; 8] = [0, 0, 5, 10, 20, 35, 60, 0];
+
 /// PST value for a piece on `sq` (white-oriented tables, mirrored for Black).
 #[inline]
 fn pst_index(sq: u8, color: Color) -> usize {
@@ -329,112 +334,32 @@ impl EvalParams {
         tempo: 15,
     };
 
-    /// Names in `to_spec` order; also the accepted `from_spec` keys.
-    pub const KEYS: [&'static str; 34] = [
-        "mob_knight",
-        "mob_bishop",
-        "mob_rook",
-        "mob_queen",
-        "bishop_pair",
-        "passed_scale",
-        "doubled",
-        "isolated",
-        "connected",
-        "blocked",
-        "rook_open",
-        "rook_semi",
-        "rook7",
-        "shield_pawn",
-        "shield_cap",
-        "shield_missing",
-        "pressure_scale",
-        "trap_bonus",
-        "king_pressure",
-        "king_danger",
-        "alpha_shield",
-        "alpha_castle",
-        "alpha_king_danger",
-        "alpha_own_loose",
-        "alpha_mob_knight",
-        "alpha_mob_bishop",
-        "alpha_bishop_pair",
-        "alpha_passed",
-        "alpha_pawn",
-        "alpha_knight",
-        "alpha_bishop",
-        "alpha_rook",
-        "alpha_queen",
-        "tempo",
-    ];
-
-    /// Set one parameter by name. Unknown names are an error (typos in a
-    /// training run would otherwise silently fall back to the baseline).
-    pub fn set(&mut self, key: &str, value: i32) -> Result<(), String> {
-        match key {
-            "mob_knight" => self.mob_knight = value,
-            "mob_bishop" => self.mob_bishop = value,
-            "mob_rook" => self.mob_rook = value,
-            "mob_queen" => self.mob_queen = value,
-            "bishop_pair" => self.bishop_pair = value,
-            "passed_scale" => self.passed_scale = value,
-            "doubled" => self.doubled = value,
-            "isolated" => self.isolated = value,
-            "connected" => self.connected = value,
-            "blocked" => self.blocked = value,
-            "rook_open" => self.rook_open = value,
-            "rook_semi" => self.rook_semi = value,
-            "rook7" => self.rook7 = value,
-            "shield_pawn" => self.shield_pawn = value,
-            "shield_cap" => self.shield_cap = value,
-            "shield_missing" => self.shield_missing = value,
-            "pressure_scale" => self.pressure_scale = value,
-            "trap_bonus" => self.trap_bonus = value,
-            "king_pressure" => self.king_pressure = value,
-            "king_danger" => self.king_danger = value,
-            "alpha_shield" => self.alpha_shield = value,
-            "alpha_castle" => self.alpha_castle = value,
-            "alpha_king_danger" => self.alpha_king_danger = value,
-            "alpha_own_loose" => self.alpha_own_loose = value,
-            "alpha_mob_knight" => self.alpha_mob_knight = value,
-            "alpha_mob_bishop" => self.alpha_mob_bishop = value,
-            "alpha_bishop_pair" => self.alpha_bishop_pair = value,
-            "alpha_passed" => self.alpha_passed = value,
-            "alpha_pawn" => self.alpha_pawn = value,
-            "alpha_knight" => self.alpha_knight = value,
-            "alpha_bishop" => self.alpha_bishop = value,
-            "alpha_rook" => self.alpha_rook = value,
-            "alpha_queen" => self.alpha_queen = value,
-            "tempo" => self.tempo = value,
-            other => return Err(format!("unknown eval parameter '{other}'")),
-        }
-        Ok(())
-    }
+    // Keys, `set` and `get` are generated from this one field list.
+    param_accessors!("eval";
+        mob_knight, mob_bishop, mob_rook, mob_queen,
+        bishop_pair, passed_scale,
+        doubled, isolated, connected, blocked,
+        rook_open, rook_semi, rook7,
+        shield_pawn, shield_cap, shield_missing,
+        pressure_scale, trap_bonus, king_pressure, king_danger,
+        alpha_shield, alpha_castle, alpha_king_danger, alpha_own_loose,
+        alpha_mob_knight, alpha_mob_bishop, alpha_bishop_pair, alpha_passed,
+        alpha_pawn, alpha_knight, alpha_bishop, alpha_rook, alpha_queen,
+        tempo
+    );
 
     /// Parse `key=value,key=value` (commas or semicolons). An empty spec is
     /// the baseline. Values are plain integers.
     pub fn from_spec(spec: &str) -> Result<EvalParams, String> {
         let mut p = EvalParams::DEFAULT;
-        for part in spec.split([',', ';']) {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let (k, v) = part
-                .split_once('=')
-                .ok_or_else(|| format!("expected key=value, got '{part}'"))?;
-            let v: i32 = v
-                .trim()
-                .parse()
-                .map_err(|_| format!("bad integer '{}' for '{}'", v.trim(), k.trim()))?;
-            p.set(k.trim(), v)?;
-        }
+        crate::params::parse_spec(spec, |k, v| p.set(k, v))?;
         Ok(p)
     }
 
     /// Serialise every parameter (stable key order, suitable for logs).
     pub fn to_spec(&self) -> String {
         let mut out = String::new();
-        for key in Self::KEYS {
+        for &key in Self::KEYS {
             if !out.is_empty() {
                 out.push(',');
             }
@@ -443,46 +368,6 @@ impl EvalParams {
             out.push_str(&self.get(key).to_string());
         }
         out
-    }
-
-    fn get(&self, key: &str) -> i32 {
-        match key {
-            "mob_knight" => self.mob_knight,
-            "mob_bishop" => self.mob_bishop,
-            "mob_rook" => self.mob_rook,
-            "mob_queen" => self.mob_queen,
-            "bishop_pair" => self.bishop_pair,
-            "passed_scale" => self.passed_scale,
-            "doubled" => self.doubled,
-            "isolated" => self.isolated,
-            "connected" => self.connected,
-            "blocked" => self.blocked,
-            "rook_open" => self.rook_open,
-            "rook_semi" => self.rook_semi,
-            "rook7" => self.rook7,
-            "shield_pawn" => self.shield_pawn,
-            "shield_cap" => self.shield_cap,
-            "shield_missing" => self.shield_missing,
-            "pressure_scale" => self.pressure_scale,
-            "trap_bonus" => self.trap_bonus,
-            "king_pressure" => self.king_pressure,
-            "king_danger" => self.king_danger,
-            "alpha_shield" => self.alpha_shield,
-            "alpha_castle" => self.alpha_castle,
-            "alpha_king_danger" => self.alpha_king_danger,
-            "alpha_own_loose" => self.alpha_own_loose,
-            "alpha_mob_knight" => self.alpha_mob_knight,
-            "alpha_mob_bishop" => self.alpha_mob_bishop,
-            "alpha_bishop_pair" => self.alpha_bishop_pair,
-            "alpha_passed" => self.alpha_passed,
-            "alpha_pawn" => self.alpha_pawn,
-            "alpha_knight" => self.alpha_knight,
-            "alpha_bishop" => self.alpha_bishop,
-            "alpha_rook" => self.alpha_rook,
-            "alpha_queen" => self.alpha_queen,
-            "tempo" => self.tempo,
-            _ => 0,
-        }
     }
 }
 
@@ -605,7 +490,6 @@ fn alpha_passed(board: &Board, color: Color, scale: i32) -> i32 {
     if scale == 0 {
         return 0;
     }
-    const TABLE: [i32; 8] = [0, 0, 5, 10, 20, 35, 60, 0];
     let enemy_pawns = board.pieces[color.other().idx() * 6];
     let mut pawns = board.pieces[color.idx() * 6];
     let mut s = 0;
@@ -617,7 +501,7 @@ fn alpha_passed(board: &Board, color: Color, scale: i32) -> i32 {
                 Color::White => rank_of(sq),
                 Color::Black => 7 - rank_of(sq),
             };
-            s += TABLE[rank as usize] * scale / 100;
+            s += PASSED_BONUS[rank as usize] * scale / 100;
         }
     }
     s
@@ -777,7 +661,6 @@ fn pawn_structure(board: &Board, color: Color, p: &EvalParams) -> i32 {
     let enemy_pawns = board.pieces[color.other().idx() * 6];
     let mut penalty = 0i32;
     // Passed-pawn bonus by rank (from this colour's point of view).
-    let passed_bonus = [0, 0, 5, 10, 20, 35, 60, 0];
     // File masks let doubled/isolated be answered with two popcounts
     // per pawn instead of nested loops over all pawns.
     let mut file_count = [0u32; 8];
@@ -824,13 +707,8 @@ fn pawn_structure(board: &Board, color: Color, p: &EvalParams) -> i32 {
             penalty += p.doubled * same_file;
         }
         // Isolated: check neighbouring file masks instead of looping.
-        let mut has_neighbour = false;
-        if f > 0 && file_mask[f - 1] != 0 {
-            has_neighbour = true;
-        }
-        if f < 7 && file_mask[f + 1] != 0 {
-            has_neighbour = true;
-        }
+        let has_neighbour = (f > 0 && file_mask[f - 1] != 0)
+            || (f < 7 && file_mask[f + 1] != 0);
         if !has_neighbour {
             penalty += p.isolated;
         }
@@ -842,7 +720,7 @@ fn pawn_structure(board: &Board, color: Color, p: &EvalParams) -> i32 {
             Color::Black => 7 - rank,
         };
         if enemy_pawns & passed_pawn_mask(sq, color) == 0 {
-            penalty -= passed_bonus[rank_from_own as usize] * p.passed_scale / 100;
+            penalty -= PASSED_BONUS[rank_from_own as usize] * p.passed_scale / 100;
         }
     }
     // Desired bonus = passed - doubled - isolated = -(doubled + isolated - passed).
@@ -885,25 +763,7 @@ fn rook_files(board: &Board, color: Color, p: &EvalParams) -> i32 {
 
 #[cfg(feature = "advanced-eval")]
 fn king_safety(board: &Board, color: Color, p: &EvalParams) -> i32 {
-    let king_sq = board.king_sq[color.idx()];
-    let king_file = file_of(king_sq) as i32;
-    let king_rank = rank_of(king_sq) as i32;
-    let pawns = board.pieces[color.idx() * 6];
-    let dir: i32 = match color {
-        Color::White => 1,
-        Color::Black => -1,
-    };
-    let mut shield = 0;
-    for &df in &[-1, 0, 1] {
-        let f = king_file + df;
-        let r = king_rank + dir;
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = (r * 8 + f) as u8;
-            if pawns & bit(sq) != 0 {
-                shield += 1;
-            }
-        }
-    }
+    let shield = pawn_shield(board, color);
     // Up to a full-shield cap; missing pawns scale the penalty.
     // (Enemy-attack penalties were tried and measured to widen nodes
     // +83% at d8 and lose Elo; the shield alone is kept. Castling
@@ -911,9 +771,9 @@ fn king_safety(board: &Board, color: Color, p: &EvalParams) -> i32 {
     (shield * p.shield_pawn).min(p.shield_cap) - (3 - shield.min(3)) * p.shield_missing
 }
 
-/// Alpha "defensive" playstyle: bonus for pawns shielding your own king.
-#[cfg(not(feature = "advanced-eval"))]
-fn shield_bonus(board: &Board, color: Color, per_pawn: i32) -> i32 {
+/// Number of own pawns on the three squares directly in front of `color`'s
+/// king (the pawn shield). Shared by the Alpha and Gamma king-safety terms.
+fn pawn_shield(board: &Board, color: Color) -> i32 {
     let ksq = board.king_sq[color.idx()];
     let kfile = file_of(ksq) as i32;
     let krank = rank_of(ksq) as i32;
@@ -922,8 +782,8 @@ fn shield_bonus(board: &Board, color: Color, per_pawn: i32) -> i32 {
         Color::White => 1,
         Color::Black => -1,
     };
-    let mut shield = 0i32;
-    for &df in &[-1, 0, 1] {
+    let mut shield = 0;
+    for df in [-1, 0, 1] {
         let f = kfile + df;
         let r = krank + dir;
         if (0..8).contains(&f) && (0..8).contains(&r) {
@@ -933,7 +793,13 @@ fn shield_bonus(board: &Board, color: Color, per_pawn: i32) -> i32 {
             }
         }
     }
-    shield * per_pawn
+    shield
+}
+
+/// Alpha "defensive" playstyle: bonus for pawns shielding your own king.
+#[cfg(not(feature = "advanced-eval"))]
+fn shield_bonus(board: &Board, color: Color, per_pawn: i32) -> i32 {
+    pawn_shield(board, color) * per_pawn
 }
 
 /// Value of a loose piece, by kind (index matches `PieceType`), in
@@ -1102,9 +968,8 @@ impl Pressure {
 /// N/B/R/Q that the opponent attacks more often than the owner defends
 /// them, and that at least one cheap-enough attacker can profit from.
 /// Pins are not modelled — this is a static heuristic, not a full exchange
-/// evaluation. Kept as a small wrapper for the Alpha style term and the
-/// unit tests.
-#[allow(dead_code)]
+/// evaluation. Used by the Alpha style term and the Gamma unit tests.
+#[cfg(any(not(feature = "advanced-eval"), test))]
 fn loose_material_by_owner(board: &Board) -> [i32; 2] {
     Pressure::scan(
         board,

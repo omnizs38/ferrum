@@ -56,7 +56,7 @@
 
 use crate::board::Board;
 use crate::eval::{evaluate_with, EvalParams};
-use crate::search::{SearchInfo, SearchLimits, SearchParams, Searcher, MATE};
+use crate::search::{mate_in, SearchInfo, SearchLimits, SearchParams, Searcher};
 use crate::tt::{default_hash_mb, TranspositionTable, MAX_HASH_MB};
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -398,6 +398,28 @@ fn search_handle(e: &mut FerrumEngine, limits: &SearchLimits) -> SearchInfo {
     })
 }
 
+/// Apply the optional per-call thread override, build the limits and search.
+/// Shared by `ferrum_go` and `ferrum_go_json`.
+fn run_search(
+    e: &mut FerrumEngine,
+    movetime_ms: u64,
+    depth: i32,
+    nodes: u64,
+    threads: i32,
+) -> SearchInfo {
+    if threads > 0 {
+        e.threads = (threads as usize).clamp(1, FFI_MAX_THREADS);
+    }
+    search_handle(e, &limits_from(movetime_ms, depth, nodes))
+}
+
+/// Best move as UCI text, or `"(none)"` when the search found no move.
+fn best_move_or_none(info: &SearchInfo) -> String {
+    info.best_move
+        .map(|m| m.to_uci())
+        .unwrap_or_else(|| "(none)".to_string())
+}
+
 /// Run a search and return the best move as a UCI string (allocated; free
 /// with [`ferrum_string_free`]). Returns `"(none)"` when there is no legal
 /// move. Null on a null handle/panic.
@@ -413,13 +435,8 @@ pub unsafe extern "C" fn ferrum_go(
         let Some(e) = (unsafe { engine.as_mut() }) else {
             return std::ptr::null_mut();
         };
-        if threads > 0 {
-            e.threads = (threads as usize).clamp(1, FFI_MAX_THREADS);
-        }
-        let limits = limits_from(movetime_ms, depth, nodes);
-        let info = search_handle(e, &limits);
-        let mv = info.best_move.map(|m| m.to_uci()).unwrap_or_else(|| "(none)".to_string());
-        to_c_string(mv)
+        let info = run_search(e, movetime_ms, depth, nodes, threads);
+        to_c_string(best_move_or_none(&info))
     })
 }
 
@@ -442,21 +459,11 @@ pub unsafe extern "C" fn ferrum_go_json(
         let Some(e) = (unsafe { engine.as_mut() }) else {
             return std::ptr::null_mut();
         };
-        if threads > 0 {
-            e.threads = (threads as usize).clamp(1, FFI_MAX_THREADS);
-        }
-        let limits = limits_from(movetime_ms, depth, nodes);
-        let info = search_handle(e, &limits);
-        let best = info.best_move.map(|m| m.to_uci()).unwrap_or_else(|| "(none)".to_string());
-        let mate = if info.score.abs() > MATE - 1000 {
-            let n = if info.score > 0 {
-                (MATE - info.score + 1) / 2
-            } else {
-                -((MATE + info.score + 1) / 2)
-            };
-            n.to_string()
-        } else {
-            "null".to_string()
+        let info = run_search(e, movetime_ms, depth, nodes, threads);
+        let best = best_move_or_none(&info);
+        let mate = match mate_in(info.score) {
+            Some(n) => n.to_string(),
+            None => "null".to_string(),
         };
         let pv = info
             .pv

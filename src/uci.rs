@@ -166,11 +166,12 @@ pub fn run_with_config<R: BufRead, W: Write + Send + 'static>(
                 let rest = trimmed["setoption".len()..].trim();
                 let mut name = String::new();
                 let mut value: Option<String> = None;
-                // Parse loosely: `name <name> value <value>`.
-                let lower = rest.to_lowercase();
-                if let Some(pos) = lower.find("name") {
+                // Parse loosely: `name <name> value <value>`. The search is
+                // ASCII case-insensitive and indexes the original string, so
+                // multi-byte option text cannot shift the slice boundaries.
+                if let Some(pos) = find_ci(rest, "name") {
                     let after = rest[pos + 4..].trim();
-                    if let Some(vpos) = after.to_lowercase().find(" value ") {
+                    if let Some(vpos) = find_ci(after, " value ") {
                         name = after[..vpos].trim().to_string();
                         value = Some(after[vpos + 7..].trim().to_string());
                     } else {
@@ -318,6 +319,27 @@ fn stop_and_join(search_handle: &mut Option<std::thread::JoinHandle<()>>, stop_f
     *stop_flag = Arc::new(AtomicBool::new(false));
 }
 
+/// ASCII case-insensitive substring search, returning a byte offset into
+/// `haystack`. ASCII folding preserves byte lengths, so slicing the original
+/// string at the returned offset is safe even for non-ASCII option text.
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .as_bytes()
+        .windows(n.len())
+        .position(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// A start position plus its repetition history.
+fn startpos_position() -> (Board, Vec<u64>) {
+    let board = Board::startpos();
+    let hash = board.hash;
+    (board, vec![hash])
+}
+
 fn parse_position(cmd: &str) -> Result<(Board, Vec<u64>), String> {
     let mut game_hashes: Vec<u64> = Vec::new();
     // Forms:
@@ -325,7 +347,7 @@ fn parse_position(cmd: &str) -> Result<(Board, Vec<u64>), String> {
     //   position fen <fen fields...> [moves ...]
     let parts = cmd.splitn(3, ' ').collect::<Vec<_>>();
     if parts.len() < 2 {
-        return Ok((Board::startpos(), vec![Board::startpos().hash]));
+        return Ok(startpos_position());
     }
     let mut board: Board;
     if parts.get(1).copied() == Some("startpos") {
@@ -345,7 +367,7 @@ fn parse_position(cmd: &str) -> Result<(Board, Vec<u64>), String> {
         }
         return Ok((board, game_hashes));
     } else {
-        return Ok((Board::startpos(), vec![Board::startpos().hash]));
+        return Ok(startpos_position());
     }
     // startpos + moves
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
@@ -512,4 +534,48 @@ fn search_parallel<W: Write + Send + 'static>(
     s.search(&mut b, game_history, limits, Some(stop), &|msg: String| {
         out.line(&msg);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_ci_offsets_the_original_text() {
+        assert_eq!(find_ci("name Hash value 32", "name"), Some(0));
+        assert_eq!(find_ci("NAME Hash VALUE 32", " value "), Some(9));
+        assert_eq!(find_ci("näme name x", "name"), Some(6));
+        assert_eq!(find_ci("näme", "value"), None);
+    }
+
+    #[test]
+    fn parse_position_accepts_startpos_and_fen() {
+        let (b, h) = parse_position("position startpos moves e2e4 e7e5").unwrap();
+        assert_eq!(
+            b.to_fen(),
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2"
+        );
+        assert_eq!(h.len(), 3); // start position + two moves
+        let (b, _) = parse_position("position fen 8/8/8/4k3/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(b.to_fen().starts_with("8/8/8/4k3/"));
+        assert!(parse_position("position fen bad").is_err());
+    }
+
+    #[test]
+    fn go_limits_cover_depth_nodes_and_clock() {
+        let b = Board::startpos();
+        let limits = parse_go("go depth 7", &b);
+        assert_eq!(limits.depth, 7);
+        assert!(limits.time_ms.is_none());
+
+        let limits = parse_go("go nodes 5000", &b);
+        assert_eq!(limits.nodes, Some(5000));
+
+        let limits = parse_go("go movetime 250", &b);
+        assert_eq!(limits.time_ms, Some(250));
+
+        let limits = parse_go("go wtime 1000 btime 1000 winc 10 binc 10", &b);
+        let ms = limits.time_ms.unwrap();
+        assert!((1..=1000).contains(&ms));
+    }
 }

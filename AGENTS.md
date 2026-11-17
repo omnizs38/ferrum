@@ -15,8 +15,11 @@ feature.
 `README.md` has the module map; `ELO.md` is the measured-strength log;
 `docs/variant-styles.md` explains the eval/playstyle differences;
 `docs/training.md` describes the in-process trainer and training workflow;
-`docs/speed.md` records search-speed benchmarks against Stockfish 19.
-No CI exists: verification is local.
+`docs/speed.md` records search-speed benchmarks against Stockfish 19;
+`docs/server.md` covers the C ABI/embedding model. No CI exists:
+verification is local. The project is deliberately dependency-free (no
+crates) and contains no code borrowed from Stockfish — implement from
+scratch rather than vendoring or copying.
 
 ## Build, test, lint
 
@@ -31,6 +34,9 @@ cargo clippy --all-targets -- -D warnings     # currently clean
 
 - Single test: `cargo test board::tests::perft_kiwipete` (add
   `--no-default-features` to check Alpha-only paths).
+- Both variants build to the **same** `target/release/ferrum(.exe)` path, so
+  a later Alpha build silently replaces Gamma. Copy/rename between variants
+  before comparing (see `ELO.md` "How to reproduce").
 - **Do not run `cargo fmt`**: the tree is not rustfmt-clean (it would rewrite
   nearly every file). Match the surrounding style instead.
 - `tests/uci_smoke.rs` spawns the real binary via `CARGO_BIN_EXE_ferrum`.

@@ -617,15 +617,17 @@ impl Board {
         let want_all = !captures_only || in_check;
 
         // --- pawns
+        // Direction/rank constants are per side, not per pawn: hoist them
+        // out of the loop (a board can have up to 8 pawns).
+        let dir: i8 = match us { Color::White => 8, Color::Black => -8 };
+        let start_rank: u8 = match us { Color::White => 1, Color::Black => 6 };
+        let promo_rank: u8 = match us { Color::White => 6, Color::Black => 1 };
+        let last_rank: u8 = match us { Color::White => 7, Color::Black => 0 };
         let pawns_bb = piece_bb(PieceType::Pawn);
         let mut pawns = pawns_bb;
         while pawns != 0 {
             let (sq, rest) = pop_lsb(pawns);
             pawns = rest;
-            let dir: i8 = match us { Color::White => 8, Color::Black => -8 };
-            let start_rank: u8 = match us { Color::White => 1, Color::Black => 6 };
-            let promo_rank: u8 = match us { Color::White => 6, Color::Black => 1 };
-            let last_rank: u8 = match us { Color::White => 7, Color::Black => 0 };
             let rank = rank_of(sq);
             // Captures (pawn_attacks covers both diagonals).
             // Excludes the enemy king via `enemy_bb`.
@@ -681,14 +683,7 @@ impl Board {
             if captures_only {
                 targets &= enemy_bb;
             }
-            let mut t = targets;
-            while t != 0 {
-                let (to, rest) = pop_lsb(t);
-                t = rest;
-                let mut m = Move::new(sq, to, None);
-                if enemy_bb & bit(to) != 0 { m.is_capture = true; }
-                list.push(m);
-            }
+            push_targets(list, sq, targets, enemy_bb);
         }
 
         // --- bishops, rooks, queens
@@ -706,14 +701,7 @@ impl Board {
                 if captures_only {
                     targets &= enemy_bb;
                 }
-                let mut t = targets;
-                while t != 0 {
-                    let (to, rest) = pop_lsb(t);
-                    t = rest;
-                    let mut m = Move::new(sq, to, None);
-                    if enemy_bb & bit(to) != 0 { m.is_capture = true; }
-                    list.push(m);
-                }
+                push_targets(list, sq, targets, enemy_bb);
             }
         }
 
@@ -725,14 +713,7 @@ impl Board {
             if captures_only {
                 targets &= enemy_bb;
             }
-            let mut t = targets;
-            while t != 0 {
-                let (to, rest) = pop_lsb(t);
-                t = rest;
-                let mut m = Move::new(sq, to, None);
-                if enemy_bb & bit(to) != 0 { m.is_capture = true; }
-                list.push(m);
-            }
+            push_targets(list, sq, targets, enemy_bb);
         }
 
         // --- castling
@@ -816,6 +797,22 @@ impl Board {
         let target = Move::from_uci(uci)?;
         let legal = self.generate_legal_moves();
         legal.iter().find(|m| m.from == target.from && m.to == target.to && m.promo == target.promo).copied()
+    }
+}
+
+/// Push every square in `targets` as a quiet/capture move from `from`.
+/// Captures are tagged against `enemy_bb`; king targets are filtered by the
+/// caller, so this never produces a king capture.
+fn push_targets(list: &mut MoveList, from: u8, targets: Bitboard, enemy_bb: Bitboard) {
+    let mut t = targets;
+    while t != 0 {
+        let (to, rest) = pop_lsb(t);
+        t = rest;
+        let mut m = Move::new(from, to, None);
+        if enemy_bb & bit(to) != 0 {
+            m.is_capture = true;
+        }
+        list.push(m);
     }
 }
 

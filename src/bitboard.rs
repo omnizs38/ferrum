@@ -105,7 +105,7 @@ fn build_tables() -> Tables {
                 pawn_attackers_black[sq as usize] |= bit((br * 8 + nf) as u8);
             }
         }
-            // Passed-pawn masks: squares in front on same/adjacent files.
+        // Passed-pawn masks: squares in front on same/adjacent files.
         // White pawn advances toward higher ranks; Black toward lower.
         for &df in &[-1, 0, 1] {
             let nf = f + df;

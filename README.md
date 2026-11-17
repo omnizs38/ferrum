@@ -158,6 +158,8 @@ The changes are node-identical (bench unchanged), so strength is unaffected.
 ```
 src/
   types.rs    Colours, pieces, Move / MoveList, square <-> string.
+  params.rs   Shared `key=value,...` spec parser and generated accessors for
+              the trainable `EvalParams` / `SearchParams` tables.
   bitboard.rs Bitboard type, precomputed leaper tables (built at startup by
               looping over the board — no magic numbers), attack tests.
   sliders.rs  Sliding attacks from occupancy-indexed tables (bishop and rook,

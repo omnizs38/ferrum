@@ -22,8 +22,9 @@ use crate::bitboard::{
 };
 use crate::board::Board;
 use crate::eval::{evaluate_with, EvalParams};
+use crate::params::param_accessors;
 use crate::tt::{Bound, TranspositionTable};
-use crate::types::{Color, Move, PieceType};
+use crate::types::{Color, Move, MoveList, PieceType, MAX_MOVES};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -118,75 +119,31 @@ impl SearchParams {
         iid_min_depth: 0,
     };
 
-    pub const KEYS: [&'static str; 12] = [
-        "rfp_margin",
-        "rfp_max_depth",
-        "futility_margin",
-        "lmp_base",
-        "lmp_max_depth",
-        "lmr_div",
-        "qsearch",
-        "qs_max_plies",
-        "null_r_base",
-        "null_r_div",
-        "asp_delta",
-        "iid_min_depth",
-    ];
-
-    pub fn set(&mut self, key: &str, value: i32) -> Result<(), String> {
-        match key {
-            "rfp_margin" => self.rfp_margin = value,
-            "rfp_max_depth" => self.rfp_max_depth = value,
-            "futility_margin" => self.futility_margin = value,
-            "lmp_base" => self.lmp_base = value,
-            "lmp_max_depth" => self.lmp_max_depth = value,
-            "lmr_div" => self.lmr_div = value,
-            "qsearch" => self.qsearch = value,
-            "qs_max_plies" => self.qs_max_plies = value,
-            "null_r_base" => self.null_r_base = value,
-            "null_r_div" => self.null_r_div = value,
-            "asp_delta" => self.asp_delta = value,
-            "iid_min_depth" => self.iid_min_depth = value,
-            other => return Err(format!("unknown search parameter '{other}'")),
-        }
-        Ok(())
-    }
+    // Keys, `set` and `get` are generated from this one field list.
+    param_accessors!("search";
+        rfp_margin, rfp_max_depth, futility_margin,
+        lmp_base, lmp_max_depth, lmr_div,
+        qsearch, qs_max_plies,
+        null_r_base, null_r_div, asp_delta, iid_min_depth
+    );
 
     pub fn from_spec(spec: &str) -> Result<SearchParams, String> {
         let mut p = SearchParams::DEFAULT;
-        for part in spec.split([',', ';']) {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let (k, v) = part
-                .split_once('=')
-                .ok_or_else(|| format!("expected key=value, got '{part}'"))?;
-            let v: i32 = v
-                .trim()
-                .parse()
-                .map_err(|_| format!("bad integer '{}' for '{}'", v.trim(), k.trim()))?;
-            p.set(k.trim(), v)?;
-        }
+        crate::params::parse_spec(spec, |k, v| p.set(k, v))?;
         Ok(p)
     }
 
     pub fn to_spec(&self) -> String {
-        format!(
-            "rfp_margin={},rfp_max_depth={},futility_margin={},lmp_base={},lmp_max_depth={},lmr_div={},qsearch={},qs_max_plies={},null_r_base={},null_r_div={},asp_delta={},iid_min_depth={}",
-            self.rfp_margin,
-            self.rfp_max_depth,
-            self.futility_margin,
-            self.lmp_base,
-            self.lmp_max_depth,
-            self.lmr_div,
-            self.qsearch,
-            self.qs_max_plies,
-            self.null_r_base,
-            self.null_r_div,
-            self.asp_delta,
-            self.iid_min_depth
-        )
+        let mut out = String::new();
+        for &key in Self::KEYS {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&self.get(key).to_string());
+        }
+        out
     }
 }
 
@@ -303,26 +260,26 @@ impl Searcher {
             {
                 let elapsed = start.elapsed().as_millis().max(1) as u64;
                 let nps = (self.nodes * 1000) / elapsed;
-                let pv_moves = self.extract_pv();                best_pv = pv_moves.clone();
-                let mut pv_str = String::new();
-                for m in pv_moves.iter() {
-                    if !pv_str.is_empty() {
-                        pv_str.push(' ');
-                    }
-                    pv_str.push_str(&m.to_uci());
-                }
-                let score_str = if best_score.abs() > MATE - 1000 {
-                    let mate_in = if best_score > 0 { (MATE - best_score + 1) / 2 } else { (MATE + best_score + 1) / 2 };
-                    format!("mate {}", mate_in)
-                } else {
-                    format!("cp {}", best_score)
+                let pv_moves = self.extract_pv();
+                best_pv = pv_moves.clone();
+                let pv_str = pv_moves
+                    .iter()
+                    .map(Move::to_uci)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let score_str = match mate_in(best_score) {
+                    Some(n) => format!("mate {n}"),
+                    None => format!("cp {best_score}"),
                 };
-                let info = if pv_str.is_empty() {
-                    format!("info depth {} score {} nodes {} nps {} time {}", completed_depth, score_str, self.nodes, nps, elapsed)
+                let pv_suffix = if pv_str.is_empty() {
+                    String::new()
                 } else {
-                    format!("info depth {} score {} nodes {} nps {} time {} pv {}", completed_depth, score_str, self.nodes, nps, elapsed, pv_str)
+                    format!(" pv {pv_str}")
                 };
-                on_info(info);
+                on_info(format!(
+                    "info depth {} score {} nodes {} nps {} time {}{}",
+                    completed_depth, score_str, self.nodes, nps, elapsed, pv_suffix
+                ));
             }
             if limits.infinite {
                 continue;
@@ -368,17 +325,16 @@ impl Searcher {
         };
         for attempt in 0..5 {
             let (score, mv) = self.negamax(board, depth, alpha, beta, 0, true, true);
-            if self.should_stop() || attempt == 4 {
-                if self.should_stop() {
-                    return (prev_score, mv);
-                }
-                // Last attempt used the full window; its score is final.
-                if score > alpha && score < beta {
-                    return (score, mv);
-                }
+            if self.should_stop() {
+                return (prev_score, mv);
             }
             if score > alpha && score < beta {
                 return (score, mv);
+            }
+            if attempt == 4 {
+                // The fifth attempt used the widest window; fall through to
+                // one final full-window search rather than widening forever.
+                break;
             }
             // Missed the window: re-center on the score with doubled radius.
             delta *= 2;
@@ -496,26 +452,16 @@ impl Searcher {
             }
         }
 
-        // TT probe share the same single lock for both cases: one lock per
-        // node. PV nodes keep the depth-sufficient entry so the singular
-        // extension can use its bound (used only for the bound test).
+        // One lock covers both the ordering move and the cutoff entry.
         let (mut tt_move, tt_entry) = self.tt.probe_both(board.hash, depth);
-        let mut tt_score: Option<i32> = None;
         if !pv_node {
             if let Some(e) = tt_entry {
                 let s = adjust_from_tt(e.score, ply);
                 match e.flag {
                     Bound::Exact => return (s, e.best),
-                    Bound::Lower => tt_score = Some(s.max(tt_score.unwrap_or(-INF))),
-                    Bound::Upper => tt_score = Some(s.min(tt_score.unwrap_or(INF))),
-                }
-                if let Some(s) = tt_score {
-                    if e.flag == Bound::Lower && s >= beta {
-                        return (s, e.best);
-                    }
-                    if e.flag == Bound::Upper && s <= alpha {
-                        return (s, e.best);
-                    }
+                    Bound::Lower if s >= beta => return (s, e.best),
+                    Bound::Upper if s <= alpha => return (s, e.best),
+                    _ => {}
                 }
             }
         }
@@ -743,7 +689,7 @@ impl Searcher {
 
         let mut moves = board.generate_moves_with_check(true, in_check);
         // Order captures by MVV-LVA (cheap: sorts a small list).
-        self.order_captures(board, &mut moves, ply);
+        self.order_captures(board, &mut moves);
         let us = board.side;
         let mut legal = 0;
         self.path_hashes.push(board.hash);
@@ -828,61 +774,50 @@ impl Searcher {
         }
     }
 
-    fn order_moves(&self, board: &Board, moves: &mut crate::types::MoveList, tt_move: Option<Move>, ply: usize) {
+    /// Sort `moves` by descending `score(m)` without allocating. Move lists
+    /// are short (tens), so insertion sort is plenty.
+    fn order_by(&self, moves: &mut MoveList, score: impl Fn(&Move) -> i32) {
         let n = moves.len();
         if n <= 1 {
             return;
         }
-        let mut scores = [std::mem::MaybeUninit::<i32>::uninit(); crate::types::MAX_MOVES];
-        self.score_moves(board, moves, tt_move, ply, &mut scores[..n]);
+        let mut buf = [std::mem::MaybeUninit::<i32>::uninit(); MAX_MOVES];
+        for (i, m) in moves.as_slice().iter().enumerate() {
+            buf[i].write(score(m));
+        }
         // SAFETY: exactly `n` scores were written above.
-        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
+        let scores = unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<i32>(), n)
+        };
         sort_moves_by_score(moves, scores);
     }
 
-    /// Score every generated move into `scores` (same order as `moves`).
-    /// The caller picks the next move lazily, so cut nodes avoid sorting.
-    fn score_moves(
-        &self,
-        board: &Board,
-        moves: &crate::types::MoveList,
-        tt_move: Option<Move>,
-        ply: usize,
-        scores: &mut [std::mem::MaybeUninit<i32>],
-    ) {
-        for (i, m) in moves.as_slice().iter().enumerate() {
-            let s = if Some(*m) == tt_move {
-                10_000_000
-            } else if m.is_capture || m.promo.is_some() {
-                // SEE ordering tried and measured negative at 500 ms
-                // (nodes rose); MVV-LVA alone is kept.
-                let mut s = 9_000_000 + capture_score(board, m);
-                if m.promo.is_some() {
-                    s += 1000;
-                }
-                s
-            } else if self.is_killer(*m, ply) {
-                7_000_000
-            } else {
-                let slot = self.slot(board, m.from);
-                self.history[slot][m.to as usize]
-            };
-            scores[i].write(s);
-        }
+    fn order_moves(&self, board: &Board, moves: &mut MoveList, tt_move: Option<Move>, ply: usize) {
+        self.order_by(moves, |m| self.move_score(board, m, tt_move, ply));
     }
 
-    fn order_captures(&self, board: &Board, moves: &mut crate::types::MoveList, _ply: usize) {
-        let n = moves.len();
-        if n <= 1 {
-            return;
+    /// Ordering score for one move (higher = tried earlier).
+    fn move_score(&self, board: &Board, m: &Move, tt_move: Option<Move>, ply: usize) -> i32 {
+        if Some(*m) == tt_move {
+            return 10_000_000;
         }
-        let mut scores = [std::mem::MaybeUninit::<i32>::uninit(); crate::types::MAX_MOVES];
-        for (i, m) in moves.as_slice().iter().enumerate() {
-            scores[i].write(capture_score(board, m));
+        if m.is_capture || m.promo.is_some() {
+            // SEE ordering tried and measured negative at 500 ms
+            // (nodes rose); MVV-LVA alone is kept.
+            let mut s = 9_000_000 + capture_score(board, m);
+            if m.promo.is_some() {
+                s += 1000;
+            }
+            return s;
         }
-        // SAFETY: as in `order_moves`.
-        let scores = unsafe { std::slice::from_raw_parts_mut(scores.as_mut_ptr().cast::<i32>(), n) };
-        sort_moves_by_score(moves, scores);
+        if self.is_killer(*m, ply) {
+            return 7_000_000;
+        }
+        self.history[self.slot(board, m.from)][m.to as usize]
+    }
+
+    fn order_captures(&self, board: &Board, moves: &mut MoveList) {
+        self.order_by(moves, |m| capture_score(board, m));
     }
 }
 
@@ -895,7 +830,7 @@ fn capture_score(board: &Board, m: &Move) -> i32 {
         .unwrap_or_else(|| captured_value_from_board(board, m));
     let attacker = board
         .piece_on(m.from)
-        .map(|p| mk_victim_value(p.kind))
+        .map(|p| piece_value(p.kind))
         .unwrap_or(100);
     victim * 10 - attacker / 10
 }
@@ -935,7 +870,23 @@ fn adjust_to_tt(score: i32, ply: usize) -> i32 {
     }
 }
 
-fn mk_victim_value(k: PieceType) -> i32 {
+/// Moves to mate for a mate score, or `None` for a normal score.
+/// Positive = the side to move mates, negative = it is being mated.
+/// Shared by the UCI info line and the FFI JSON so both report the same
+/// number (and the same sign).
+pub fn mate_in(score: i32) -> Option<i32> {
+    if score > MATE - 1000 {
+        Some((MATE - score + 1) / 2)
+    } else if score < -(MATE - 1000) {
+        Some(-((MATE + score + 1) / 2))
+    } else {
+        None
+    }
+}
+
+/// Centipawn value of a piece kind, used for move ordering, SEE and
+/// qsearch delta pruning (not for evaluation, which has its own tables).
+fn piece_value(k: PieceType) -> i32 {
     match k {
         PieceType::Pawn => 100,
         PieceType::Knight => 320,
@@ -953,7 +904,7 @@ fn captured_value_from_board(board: &Board, m: &Move) -> i32 {
         return 100;
     }
     match board.piece_on(m.to) {
-        Some(p) => mk_victim_value(p.kind),
+        Some(p) => piece_value(p.kind),
         None => 0,
     }
 }
@@ -1000,9 +951,9 @@ fn see(board: &Board, m: &Move) -> i32 {
     let victim = if m.is_en_passant {
         100
     } else {
-        board.piece_on(m.to).map(|p| mk_victim_value(p.kind)).unwrap_or(0)
+        board.piece_on(m.to).map(|p| piece_value(p.kind)).unwrap_or(0)
     };
-    let promo_bonus = m.promo.map(|p| mk_victim_value(p) - 100).unwrap_or(0);
+    let promo_bonus = m.promo.map(|p| piece_value(p) - 100).unwrap_or(0);
     let mut gain = [0i32; 33];
     gain[0] = victim + promo_bonus;
     let mut occ = board.occupied ^ bit(m.from);
@@ -1011,8 +962,8 @@ fn see(board: &Board, m: &Move) -> i32 {
         occ &= !bit(cap);
     }
     let mut attacker_val = match m.promo {
-        Some(p) => mk_victim_value(p),
-        None => mk_victim_value(attacker.kind),
+        Some(p) => piece_value(p),
+        None => piece_value(attacker.kind),
     };
     // Fast path: if the victim alone is worth at least the moving piece,
     // the capture cannot lose material in the static exchange (the mover
@@ -1172,6 +1123,25 @@ mod tests {
         let best = info.best_move.expect("root move");
         let legal = b.generate_legal_moves();
         assert!(legal.iter().any(|m| *m == best));
+    }
+
+    #[test]
+    fn search_param_spec_roundtrip() {
+        let spec = SearchParams::DEFAULT.to_spec();
+        assert_eq!(SearchParams::from_spec(&spec).unwrap(), SearchParams::DEFAULT);
+        assert!(SearchParams::from_spec("nope=1").is_err());
+        assert!(SearchParams::from_spec("lmr_div=x").is_err());
+        let p = SearchParams::from_spec("qsearch=0; lmp_base=7").unwrap();
+        assert_eq!(p.qsearch, 0);
+        assert_eq!(p.lmp_base, 7);
+    }
+
+    #[test]
+    fn mate_in_reports_both_signs() {
+        assert_eq!(mate_in(MATE - 3), Some(2));
+        assert_eq!(mate_in(-(MATE - 3)), Some(-2));
+        assert_eq!(mate_in(0), None);
+        assert_eq!(mate_in(500), None);
     }
 
     #[test]

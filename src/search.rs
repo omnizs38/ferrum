@@ -512,9 +512,20 @@ impl Searcher {
             }
         }
 
-        // Move generation + ordering (reuse the check test above).
+        // Move generation + ordering (reuse the check test above). Scores are
+        // computed once; the list is ordered lazily (only the prefix that is
+        // actually searched is selected), because most nodes cut after a few
+        // moves and a full sort would pay for every move every time.
         let mut moves = board.generate_moves_with_check(false, in_check);
-        self.order_moves(board, &mut moves, tt_move, ply);
+        let n_moves = moves.len();
+        let mut order_buf = [std::mem::MaybeUninit::<i32>::uninit(); MAX_MOVES];
+        for (i, m) in moves.as_slice().iter().enumerate() {
+            order_buf[i].write(self.move_score(board, m, tt_move, ply));
+        }
+        // SAFETY: exactly `n_moves` scores were written above.
+        let order_scores = unsafe {
+            std::slice::from_raw_parts_mut(order_buf.as_mut_ptr().cast::<i32>(), n_moves)
+        };
         let us = board.side;
         let mut best = -INF;
         let mut best_move: Option<Move> = None;
@@ -523,7 +534,30 @@ impl Searcher {
         self.pv_len[ply] = ply;
 
         self.path_hashes.push(board.hash);
-        for i in 0..moves.len() {
+        for i in 0..n_moves {
+            // Lazy selection: bring the best-scored remaining move into slot
+            // `i`. Ties keep their generation order, so the tree is identical
+            // to a full stable sort.
+            let mut pick = i;
+            for j in (i + 1)..n_moves {
+                if order_scores[j] > order_scores[pick] {
+                    pick = j;
+                }
+            }
+            if pick != i {
+                // Stable selection: rotate the pick into place so moves with
+                // equal scores keep their generated order (a swap would
+                // reverse ties and change the tree).
+                let ms = moves.as_mut_slice();
+                let mv = ms[pick];
+                let sc = order_scores[pick];
+                for k in (i..pick).rev() {
+                    ms[k + 1] = ms[k];
+                    order_scores[k + 1] = order_scores[k];
+                }
+                ms[i] = mv;
+                order_scores[i] = sc;
+            }
             let m = moves[i];
             let is_capture = m.is_capture || m.promo.is_some();
             // Killer test is used by the pruning and LMR below.
@@ -647,7 +681,14 @@ impl Searcher {
             }
         }
 
-        // TT store.
+        // TT store. A stopped search must not store: its `best` may be a
+        // partial result from an incomplete move list, and an Upper/Lower
+        // bound from an aborted node is wrong for the stored depth. Such
+        // entries survive into the next move's search and can cut real
+        // tactics, so the check is before the store, not after.
+        if self.should_stop() {
+            return (best, best_move);
+        }
         let flag = if best <= alpha_orig {
             Bound::Upper
         } else if best >= beta {
@@ -792,8 +833,8 @@ impl Searcher {
         sort_moves_by_score(moves, scores);
     }
 
-    fn order_moves(&self, board: &Board, moves: &mut MoveList, tt_move: Option<Move>, ply: usize) {
-        self.order_by(moves, |m| self.move_score(board, m, tt_move, ply));
+    fn order_captures(&self, board: &Board, moves: &mut MoveList) {
+        self.order_by(moves, |m| capture_score(board, m));
     }
 
     /// Ordering score for one move (higher = tried earlier).
@@ -814,10 +855,6 @@ impl Searcher {
             return 7_000_000;
         }
         self.history[self.slot(board, m.from)][m.to as usize]
-    }
-
-    fn order_captures(&self, board: &Board, moves: &mut MoveList) {
-        self.order_by(moves, |m| capture_score(board, m));
     }
 }
 

@@ -64,9 +64,43 @@ pub struct SearchParams {
     /// index >= `lmp_base + depth*depth`. 0 = off.
     pub lmp_base: i32,
     pub lmp_max_depth: i32,
-    /// LMR divisor: 0 keeps the fixed one-ply reduction; a positive value
-    /// enables the log formula `0.75 + ln(depth)*ln(index)/divisor`.
+    /// LMR divisor, in hundredths of a ply: 0 keeps the historical fixed
+    /// one-ply reduction; a positive value enables the log formula
+    /// `r = lmr_base/100 + ln(new_depth)*ln(index) / (lmr_div/100)` plies.
+    /// The formula path clamps `r` to `1..=new_depth-1`, so it never drops
+    /// below depth 1. `lmr_div=400` is the classic divisor 4.0 (the old
+    /// unscaled knob's `4`); 225 matches the traditional 2.25. Swept
+    /// 150/225/300/400 against the fixed reduction: see `ELO.md`.
     pub lmr_div: i32,
+    /// LMR log-formula base, in hundredths of a ply (75 = 0.75 plies).
+    /// Only used when `lmr_div > 0`.
+    pub lmr_base: i32,
+    /// Minimum remaining depth (`new_depth`, in plies) at which LMR runs.
+    /// 1 is the historical gate (reduce whenever `new_depth > 0`); 2 stops
+    /// the fixed one-ply reduction from pushing a depth-1 child into
+    /// qsearch. The log formula already skips `new_depth < 2`, because
+    /// reducing a depth-1 child would leave nothing but qsearch.
+    pub lmr_min_depth: i32,
+    /// 1 = allow quiet reductions at PV nodes too (still from the third
+    /// move on). 0 keeps PV nodes at full depth. Measured in the
+    /// 2026-11-17 sweep; the default is off.
+    pub lmr_pv: i32,
+    /// Fixed reduction in plies for losing captures (`SEE < 0`), from the
+    /// third move on and only at non-PV nodes unless `lmr_pv` is on.
+    /// 0 = off. Measured in the 2026-11-17 sweep; the default is off.
+    pub lmr_captures: i32,
+    /// After this many quiet moves have failed to raise alpha, add one
+    /// extra ply of reduction (the extra ply is clamped so the probe
+    /// stays at depth 1 or deeper). 0 = off.
+    pub lmr_fail_threshold: i32,
+    /// 1 = re-search a reduced move at full depth whenever its probe
+    /// returns `score > alpha`, including fail-highs. This is the standard
+    /// LMR rule and the correctness fix for zero-window cut nodes, where
+    /// `score < beta` can never hold. 0 keeps the pre-2026-11-17 in-window
+    /// re-search only, which never re-searches a reduced cut-node move.
+    /// Unreduced zero-window fail-highs are not re-searched twice: the
+    /// repeat at the same depth and window would return the same score.
+    pub lmr_research: i32,
     /// 1 = resolve captures at the horizon with quiescence; 0 = static eval
     /// (the pre-training Alpha behaviour). Exposed so training can A/B the
     /// depth-vs-tactics trade-off at a fixed clock.
@@ -111,6 +145,12 @@ impl SearchParams {
         lmp_base: 4,
         lmp_max_depth: 4,
         lmr_div: 0,
+        lmr_base: 75,
+        lmr_min_depth: 1,
+        lmr_pv: 0,
+        lmr_captures: 0,
+        lmr_fail_threshold: 0,
+        lmr_research: 0,
         qsearch: 1,
         qs_max_plies: 0,
         null_r_base: 2,
@@ -123,6 +163,8 @@ impl SearchParams {
     param_accessors!("search";
         rfp_margin, rfp_max_depth, futility_margin,
         lmp_base, lmp_max_depth, lmr_div,
+        lmr_base, lmr_min_depth, lmr_pv, lmr_captures,
+        lmr_fail_threshold, lmr_research,
         qsearch, qs_max_plies,
         null_r_base, null_r_div, asp_delta, iid_min_depth
     );
@@ -521,6 +563,10 @@ impl Searcher {
         let mut legal_moves = 0i32;
         let alpha_orig = alpha;
         self.pv_len[ply] = ply;
+        // Quiet moves that failed to raise alpha, for the quiet-failure
+        // reduction knob. Gamma-only, like LMR itself.
+        #[cfg(feature = "qsearch")]
+        let mut quiet_fails = 0i32;
 
         self.path_hashes.push(board.hash);
         for i in 0..moves.len() {
@@ -560,22 +606,62 @@ impl Searcher {
                 let (s, _) = self.negamax(board, new_depth, -beta, -alpha, ply + 1, pv_node, true);
                 score = -s;
             } else {
-                // Late-move reduction (Gamma only): quiet late moves are
-                // tried shallower first and re-searched only if they
-                // improve the score. Alpha never reduces. Reduced search
-                // is skipped entirely when the reduced depth would be
-                // tiny: at depth 1-2 the LMR saving is marginal and the
-                // risk of missing a tactic that the plain search would
-                // find is real (measure true at short TC / depth).
+                // Late-move reduction (Gamma only): late quiet moves are
+                // probed shallower first and re-searched when they beat
+                // alpha. `lmr_div=0` keeps the historical fixed one-ply
+                // reduction; a positive divisor selects the log formula.
+                // The first two moves and killers are never reduced, and
+                // Alpha never reduces at all.
                 #[cfg(feature = "qsearch")]
-                let reduce = if !pv_node && !is_capture && !is_killer && i > 1 && new_depth > 0 {
-                    if self.sparams.lmr_div > 0 {
-                        let r = 0.75
-                            + ((new_depth as f64).ln() * (i as f64).ln()
-                                / self.sparams.lmr_div as f64);
-                        (r as i32).clamp(1, 3)
+                let reduce = if i > 1
+                    && !is_killer
+                    && new_depth >= self.sparams.lmr_min_depth.max(1)
+                {
+                    if is_capture {
+                        // Losing captures are tactically suspect but still
+                        // worth a reduced probe; the full-depth verification
+                        // below confirms any cutoff. 0 = off, and PV nodes
+                        // stay full depth unless `lmr_pv` is on.
+                        if self.sparams.lmr_captures > 0
+                            && (!pv_node || self.sparams.lmr_pv > 0)
+                            && see(board, &m) < 0
+                        {
+                            self.sparams.lmr_captures.min(new_depth - 1).max(0)
+                        } else {
+                            0
+                        }
+                    } else if pv_node && self.sparams.lmr_pv <= 0 {
+                        0
+                    } else if self.sparams.lmr_div > 0 {
+                        // Log formula, clamped so the probe never drops
+                        // below depth 1. At new_depth 1 the child is
+                        // already a qsearch, so there is nothing to reduce.
+                        if new_depth < 2 {
+                            0
+                        } else {
+                            let base = self.sparams.lmr_base as f64 / 100.0;
+                            let div = (self.sparams.lmr_div as f64 / 100.0).max(0.01);
+                            let r = base
+                                + (new_depth as f64).ln() * (i as f64).ln() / div;
+                            let mut r = (r as i32).clamp(1, new_depth - 1);
+                            if self.sparams.lmr_fail_threshold > 0
+                                && quiet_fails >= self.sparams.lmr_fail_threshold
+                            {
+                                r = (r + 1).min(new_depth - 1);
+                            }
+                            r
+                        }
                     } else {
-                        1
+                        // Historical fixed one-ply reduction. It may drop a
+                        // depth-1 child into qsearch; that is the trained
+                        // baseline and stays node-identical.
+                        let mut r = 1;
+                        if self.sparams.lmr_fail_threshold > 0
+                            && quiet_fails >= self.sparams.lmr_fail_threshold
+                        {
+                            r = (r + 1).min(new_depth - 1).max(r);
+                        }
+                        r
                     }
                 } else {
                     0
@@ -583,22 +669,32 @@ impl Searcher {
                 #[cfg(not(feature = "qsearch"))]
                 let reduce = 0;
                 let reduced = (new_depth - reduce).max(0);
-                let (reduced_score, _) = self.negamax(board, reduced, -alpha - 1, -alpha, ply + 1, false, true);
+                let (reduced_score, _) =
+                    self.negamax(board, reduced, -alpha - 1, -alpha, ply + 1, false, true);
                 score = -reduced_score;
-                if score > alpha && score < beta {
-                    // Re-search with the full window. This was previously
-                    // gated to PV nodes only, so at cut nodes a late move
-                    // that improved alpha on a zero-window (and possibly
-                    // reduced) search kept its inexact score as the node's
-                    // best — that inexact value then propagates toward the
-                    // root. Re-searching whenever the score lands inside
-                    // the window keeps cut-node scores exact too.
-                    let (full_score, _) = self.negamax(board, new_depth, -beta, -alpha, ply + 1, pv_node, true);
+                // Standard LMR verification: a reduced probe that beats
+                // alpha is re-searched at full depth. At a zero-window cut
+                // node (beta = alpha+1) `score < beta` can never hold, so
+                // the historical in-window test skipped every such
+                // re-search; `lmr_research=1` restores it. The old test
+                // stays the default so existing specs remain reproducible.
+                let research = if self.sparams.lmr_research > 0 {
+                    score > alpha && (reduce > 0 || score < beta)
+                } else {
+                    score > alpha && score < beta
+                };
+                if research {
+                    let (full_score, _) =
+                        self.negamax(board, new_depth, -beta, -alpha, ply + 1, pv_node, true);
                     score = -full_score;
                 }
             }
 
             board.unmake_move();
+            #[cfg(feature = "qsearch")]
+            if !is_capture && legal_moves > 1 && score <= alpha {
+                quiet_fails += 1;
+            }
             if self.should_stop() {
                 break;
             }

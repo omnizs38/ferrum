@@ -243,6 +243,27 @@ pub struct EvalParams {
     pub king_pressure: i32,
     /// Defensive king safety: penalty per enemy attack on our own king ring.
     pub king_danger: i32,
+    /// King-attack units: cp per weighted enemy attack on our king ring
+    /// (king square plus its neighbours). Each ring square hit is weighted
+    /// by the attacker: pawn 1, knight 2, bishop 2, rook 3, queen 5;
+    /// the total is capped at 40 units. Middlespiel only, so the existing
+    /// `taper` fades it out with the queen/rook phase.
+    pub king_attack_units: i32,
+    /// cp per *distinct* enemy piece attacking our king ring (a "second
+    /// wave" bonus on top of `king_attack_units`). Middlespiel only.
+    pub king_attack_count: i32,
+    /// Extra percent scaling of `king_attack_units` per enemy queen on the
+    /// board (0 = off, 100 = double with one queen). Middlespiel only.
+    pub king_queen_scale: i32,
+    /// Penalty when the king's own file has no own pawn (open file next to
+    /// the king). Middlespiel only.
+    pub king_open_file: i32,
+    /// Penalty per file adjacent to the king with no own pawn. Middlespiel
+    /// only.
+    pub king_open_adjacent: i32,
+    /// Penalty for a king on the d/e file (uncastled or wandering king).
+    /// Middlespiel only.
+    pub king_center: i32,
     // --- Alpha simple evaluation style terms ---
     /// Defensive: cp per own pawn in the three squares in front of the king.
     pub alpha_shield: i32,
@@ -318,6 +339,13 @@ impl EvalParams {
         trap_bonus: 8,
         king_pressure: 3,
         king_danger: 0,
+        // King-attack terms are opt-in: the measured baseline keeps them off.
+        king_attack_units: 0,
+        king_attack_count: 0,
+        king_queen_scale: 0,
+        king_open_file: 0,
+        king_open_adjacent: 0,
+        king_center: 0,
         alpha_shield: 8,
         alpha_castle: 20,
         alpha_king_danger: 0,
@@ -342,6 +370,8 @@ impl EvalParams {
         rook_open, rook_semi, rook7,
         shield_pawn, shield_cap, shield_missing,
         pressure_scale, trap_bonus, king_pressure, king_danger,
+        king_attack_units, king_attack_count, king_queen_scale,
+        king_open_file, king_open_adjacent, king_center,
         alpha_shield, alpha_castle, alpha_king_danger, alpha_own_loose,
         alpha_mob_knight, alpha_mob_bishop, alpha_bishop_pair, alpha_passed,
         alpha_pawn, alpha_knight, alpha_bishop, alpha_rook, alpha_queen,
@@ -623,6 +653,9 @@ fn evaluate_color(board: &Board, color: Color, pressure: &Pressure, p: &EvalPara
     bonus += pawn_structure(board, color, p);
     bonus += rook_files(board, color, p);
     bonus += king_safety(board, color, p);
+    // Genuine king danger is middlegame-only: adding it to `mg` alone makes
+    // the existing `taper` fade it out as queen/rook phase leaves the board.
+    mg += king_attack_safety(board, color, pressure, p);
     // Gamma "cunning/trapping" playstyle: loose enemy material is prey.
     let enemy_loose = pressure.loose[color.other().idx()];
     bonus += enemy_loose * p.pressure_scale / 100;
@@ -771,6 +804,71 @@ fn king_safety(board: &Board, color: Color, p: &EvalParams) -> i32 {
     (shield * p.shield_pawn).min(p.shield_cap) - (3 - shield.min(3)) * p.shield_missing
 }
 
+/// King-attack unit weight per attacker piece (index matches `PieceType`):
+/// pawn, knight, bishop, rook, queen, king. Kings are excluded — adjacency
+/// against an enemy king is a draw probe, not an attack.
+const KING_ATTACK_UNITS: [i32; 6] = [1, 2, 2, 3, 5, 0];
+
+/// Upper bound on weighted ring attacks, so one absurd position (a wall of
+/// queens next to a bare king) cannot dominate the evaluation.
+#[cfg(feature = "advanced-eval")]
+const KING_ATTACK_UNITS_CAP: i32 = 40;
+
+/// Gamma middlegame-only king safety: weighted enemy attacks on our king
+/// ring (plus an optional second wave and queen multiplier), missing pawn
+/// cover on the king's file and a wandering king on the d/e file.
+///
+/// It is returned separately from [`king_safety`] because it must not get
+/// the usual "half in the endgame" treatment: king danger belongs to the
+/// middlegame and is tapered away as the phase drops.
+#[cfg(feature = "advanced-eval")]
+fn king_attack_safety(
+    board: &Board,
+    color: Color,
+    pressure: &Pressure,
+    p: &EvalParams,
+) -> i32 {
+    let mut s = 0i32;
+    let them = color.other();
+    if p.king_attack_units != 0 || p.king_attack_count != 0 {
+        let mut units = pressure.ring_units[them.idx()].min(KING_ATTACK_UNITS_CAP);
+        if p.king_queen_scale != 0 && units != 0 {
+            // Enemy queens turn units into threats faster than material
+            // does; the multiplier is a percentage (100 = unchanged).
+            let queens = popcount(board.pieces[them.idx() * 6 + 4]) as i32;
+            if queens != 0 {
+                units = units * (100 + p.king_queen_scale * queens) / 100;
+            }
+        }
+        s -= units * p.king_attack_units;
+        s -= pressure.ring_attackers[them.idx()] * p.king_attack_count;
+    }
+    if p.king_open_file != 0 || p.king_open_adjacent != 0 {
+        // An open or semi-open file next to the king is the highway the
+        // enemy rooks/queen use; count whole-file pawn cover, not just the
+        // three squares checked by the shield term.
+        const FILE_A: Bitboard = 0x0101_0101_0101_0101;
+        let kfile = file_of(board.king_sq[color.idx()]);
+        let pawns = board.pieces[color.idx() * 6];
+        if pawns & (FILE_A << kfile) == 0 {
+            s -= p.king_open_file;
+        }
+        if kfile > 0 && pawns & (FILE_A << (kfile - 1)) == 0 {
+            s -= p.king_open_adjacent;
+        }
+        if kfile < 7 && pawns & (FILE_A << (kfile + 1)) == 0 {
+            s -= p.king_open_adjacent;
+        }
+    }
+    if p.king_center != 0 {
+        let kfile = file_of(board.king_sq[color.idx()]);
+        if kfile == 3 || kfile == 4 {
+            s -= p.king_center;
+        }
+    }
+    s
+}
+
 /// Number of own pawns on the three squares directly in front of `color`'s
 /// king (the pawn shield). Shared by the Alpha and Gamma king-safety terms.
 fn pawn_shield(board: &Board, color: Color) -> i32 {
@@ -815,6 +913,13 @@ struct Pressure {
     trapped: [i32; 2],
     /// `king_ring[attacker]` = attacker's pieces hitting the enemy king ring.
     king_ring: [i32; 2],
+    /// `ring_units[attacker]` = weighted attacks on the enemy king ring
+    /// (each ring square counts once per attacker kind, see
+    /// [`KING_ATTACK_UNITS`]).
+    ring_units: [i32; 2],
+    /// `ring_attackers[attacker]` = number of distinct attacker pieces
+    /// hitting the enemy king ring.
+    ring_attackers: [i32; 2],
     /// Weighted mobility per colour, accumulated from the same attack sets
     /// the scan already computes (avoids a second pass in `mobility`).
     mobility: [i32; 2],
@@ -827,7 +932,8 @@ impl Pressure {
         let mut out = Pressure::default();
         let need_loose = p.pressure_scale != 0 || p.alpha_own_loose != 0;
         let need_trapped = p.trap_bonus != 0;
-        let need_ring = p.king_pressure != 0 || p.king_danger != 0;
+        let need_king_attack = p.king_attack_units != 0 || p.king_attack_count != 0;
+        let need_ring = p.king_pressure != 0 || p.king_danger != 0 || need_king_attack;
         let need_mobility = p.mob_knight != 0
             || p.mob_bishop != 0
             || p.mob_rook != 0
@@ -847,6 +953,15 @@ impl Pressure {
             } else {
                 0
             };
+            // Ring around the *attacker's* king: `owner`'s pieces are the
+            // attackers from that side's point of view, so their hits feed
+            // `ring_units[owner]` / `ring_attackers[owner]`.
+            let enemy_ring = if need_ring && need_king_attack {
+                let ksq = board.king_sq[attacker.idx()];
+                king_attacks(ksq) | bit(ksq)
+            } else {
+                0
+            };
             let a_pawns_bb = board.pieces[ab];
             let a_knights_bb = board.pieces[ab + 1];
             let a_bishops_bb = board.pieces[ab + 2];
@@ -859,13 +974,17 @@ impl Pressure {
             let o_queens_bb = board.pieces[ob + 4];
 
             if need_ring {
-                // Pawn and king pressure are cheap and complete the ring.
+                // Pawn pressure is cheap and completes the ring.
                 let mut pawns = a_pawns_bb;
                 while pawns != 0 {
                     let (sq, rest) = pop_lsb(pawns);
                     pawns = rest;
-                    out.king_ring[attacker.idx()] +=
-                        popcount(pawn_attacks(sq, attacker) & ring) as i32;
+                    let hits = popcount(pawn_attacks(sq, attacker) & ring) as i32;
+                    out.king_ring[attacker.idx()] += hits;
+                    if need_king_attack && hits != 0 {
+                        out.ring_units[attacker.idx()] += hits * KING_ATTACK_UNITS[0];
+                        out.ring_attackers[attacker.idx()] += 1;
+                    }
                 }
                 let mut kings = board.pieces[ab + 5];
                 while kings != 0 {
@@ -902,8 +1021,19 @@ impl Pressure {
                         out.trapped[owner.idx()] += 1;
                     }
                     if need_ring {
+                        // Legacy flat count: unchanged, its attribution is
+                        // what the measured `king_pressure` term uses.
                         out.king_ring[attacker.idx()] +=
                             popcount(attacks & ring) as i32;
+                    }
+                    if need_king_attack {
+                        // `owner`'s piece hitting the ring around the
+                        // attacker's king: owner is the attacking side here.
+                        let hits = popcount(attacks & enemy_ring) as i32;
+                        if hits != 0 {
+                            out.ring_units[owner.idx()] += hits * KING_ATTACK_UNITS[k];
+                            out.ring_attackers[owner.idx()] += 1;
+                        }
                     }
                     if !need_loose {
                         continue;
@@ -1152,6 +1282,99 @@ mod tests {
         let trapped = evaluate_with(&b, &p);
         // White should score the trapped black knight higher than baseline.
         assert!(trapped > base, "base={base} trapped={trapped}");
+    }
+
+    #[cfg(feature = "advanced-eval")]
+    #[test]
+    fn king_attack_scan_counts_weighted_ring_units() {
+        // White rook on the open e-file hits e7 and e8 on the Black king's
+        // ring: two rook hits = 6 units, one distinct attacker.
+        let b = Board::from_fen("4k3/8/8/8/8/8/8/4R1K1 w - - 0 1").unwrap();
+        let p = Pressure::scan(
+            &b,
+            &EvalParams {
+                king_attack_units: 1,
+                ..EvalParams::DEFAULT
+            },
+        );
+        assert_eq!(p.ring_units[Color::White.idx()], 6);
+        assert_eq!(p.ring_attackers[Color::White.idx()], 1);
+        assert_eq!(p.ring_units[Color::Black.idx()], 0);
+        assert_eq!(p.ring_attackers[Color::Black.idx()], 0);
+    }
+
+    #[cfg(feature = "advanced-eval")]
+    #[test]
+    fn king_attack_terms_penalise_the_exposed_side() {
+        // Quiet middlegame with full major pieces, White queen on h5 hits
+        // f7 on the Black king's ring. With real phase on the board the
+        // middlegame-only terms must raise White's evaluation.
+        let b = Board::from_fen(
+            "r3k2r/pppq1ppp/2npbn2/4p2Q/4P3/2NPBN2/PPP2PPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        let base = evaluate_with(&b, &EvalParams::DEFAULT);
+        let units = EvalParams {
+            king_attack_units: 10,
+            ..EvalParams::DEFAULT
+        };
+        assert!(
+            evaluate_with(&b, &units) > base,
+            "units did not bite: {base} vs {}",
+            evaluate_with(&b, &units)
+        );
+        let count = EvalParams {
+            king_attack_count: 10,
+            ..EvalParams::DEFAULT
+        };
+        assert!(
+            evaluate_with(&b, &count) > base,
+            "count did not bite: {base} vs {}",
+            evaluate_with(&b, &count)
+        );
+        // Queen multiplier: doubling the units must raise the score by the
+        // same amount again.
+        let plain = EvalParams {
+            king_attack_units: 5,
+            ..EvalParams::DEFAULT
+        };
+        let scaled = EvalParams {
+            king_attack_units: 5,
+            king_queen_scale: 100,
+            ..EvalParams::DEFAULT
+        };
+        assert!(evaluate_with(&b, &scaled) > evaluate_with(&b, &plain));
+    }
+
+    #[cfg(feature = "advanced-eval")]
+    #[test]
+    fn king_open_file_and_centre_terms_work() {
+        // White king g1 has no f/g/h pawns (only a2,b2,c2); Black's king
+        // g8 is shielded by f7,g7,h7, so only White pays the open-file term.
+        let b = Board::from_fen("r2q1rk1/5ppp/8/8/8/8/PPP5/R2Q1RK1 w - - 0 1").unwrap();
+        let base = evaluate_with(&b, &EvalParams::DEFAULT);
+        let open = EvalParams {
+            king_open_file: 20,
+            king_open_adjacent: 10,
+            ..EvalParams::DEFAULT
+        };
+        assert!(
+            evaluate_with(&b, &open) < base,
+            "open-file penalty did not bite: {base} vs {}",
+            evaluate_with(&b, &open)
+        );
+        // A king on the d/e file pays the centre penalty; g8 does not.
+        let c = Board::from_fen("r2q1rk1/5ppp/8/8/8/8/5PPP/R2QK2R w K - 0 1").unwrap();
+        let base = evaluate_with(&c, &EvalParams::DEFAULT);
+        let centre = EvalParams {
+            king_center: 15,
+            ..EvalParams::DEFAULT
+        };
+        assert!(
+            evaluate_with(&c, &centre) < base,
+            "centre penalty did not bite: {base} vs {}",
+            evaluate_with(&c, &centre)
+        );
     }
 
     #[cfg(feature = "advanced-eval")]

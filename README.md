@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo-gamma.webp" alt="Ferrum Gamma logo — an iron ingot stamped with γ" width="340">
+  <img src="docs/logo-gamma.svg" alt="Ferrum Gamma logo — an iron ingot stamped with γ" width="340">
   &nbsp;&nbsp;
   <img src="docs/logo-alpha.webp" alt="Ferrum Alpha logo — an iron ingot stamped with α" width="340">
 </p>

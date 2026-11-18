@@ -508,6 +508,66 @@ throughput (magic-style movegen, legal movegen) and large-scale SPSA over
 tens of thousands of games. This session built the harness those next steps
 need.
 
+## Gamma 2026-11-18 - evaluation caching and standard LMR re-search
+
+Two changes were kept this session. One is pure speed, one is a strength
+change; the rest of the sweep found no further gain.
+
+### Kept
+
+**1. Static-evaluation cache (node-identical when it landed).**
+`negamax` now computes the static evaluation lazily at most once per node and
+reuses it for razoring, reverse futility, null-move and depth-1 futility.
+Depth-1 nodes previously re-evaluated once per quiet move. qsearch also skips
+the stand-pat evaluation when in check, where the value is never read. The
+tree was unchanged at the time (Gamma d8 18,777; Alpha 216,764).
+
+* `tools/speed.py --nodes 2000000`: median **1,381,956 -> 1,545,006 NPS
+  (1.12x)**; median time for 2M nodes 1,460 -> 1,305 ms.
+* `tools/speed.py --movetime 100`: the middlegame position reached **depth 8
+  instead of 7** (depth sum 36 vs 35): the same clock buys a deeper search.
+* 200-game `tools/gauntlet.py` at 50 ms, cache build vs HEAD:
+  **34-28-138, +10 Elo (95% CI -38..+59)**. The direction agrees with the
+  NPS measurement; the sample is too small to stand alone.
+
+**2. `lmr_research=1` (standard LMR re-search at cut nodes).**
+A reduced move whose probe fails high is re-searched at full depth even at a
+zero-window node. The historical in-window test (`score < beta`) could never
+hold when `beta = alpha + 1`, so those re-searches were silently skipped. This
+is both the standard rule and a correctness fix; it costs nodes (Gamma d8
+18,777 -> **19,951**, Alpha unchanged at 216,764) but wins at fixed nodes and
+at fixed time:
+
+| Match | Games | TC | Result (candidate vs base) |
+|---|---|---|---|
+| `lmr_research=1` | 1200 | 20k nodes | **+20** (95% CI ~[0,+40]) |
+| `lmr_research=1` (repeat) | 1600 | 20k nodes | **+8** (95% CI -9..+26) |
+| **pooled fixed-node** | **2800** | 20k nodes | **+13** (95% CI ~[0,+26]) |
+| `lmr_research=1` | 800 | 50 ms | **+6** (95% CI -18..+30) |
+
+Bench: Gamma d8 **19,951**; Alpha d8 **216,764**. Tactics suite, full test
+suite (debug/release, both variants) and clippy are green.
+
+### Swept and rejected (defaults unchanged; most knobs kept for future runs)
+
+| Candidate | Games | Result (candidate vs base) | Verdict |
+|---|---|---|---|
+| TT cutoff before reverse futility | 1200 @20k | -13 (95% CI -32..+7) | rejected, code removed |
+| ProbCut margin 150 / 200 / 250 (`probcut_r=4`) | 800 each @20k | -7 / +6 / -3 | off |
+| ProbCut margin 150 | 500 @80k | -6 (-37..+24) | off |
+| qsearch SEE margin 50 / 100 | 600 each @20k | +9 / -12 | default 0 |
+| qsearch delta margin 150 / 250 | 600 each @20k | +10 / -1 | default 200 |
+| King-attack package (`king_attack_units=1,king_attack_count=2,king_queen_scale=50`) | 1600 @20k | +2 (-15..+19) | rejected |
+| King open-file/centre (`king_open_file=12,king_open_adjacent=6,king_center=12`) | 1600 @20k | +11 (-6..+28) | not kept (CI includes 0) |
+| LMP base 5 | 1600 @20k | -2 (-19..+15) | rejected |
+| RFP margin 100 | 1600 @20k | +7 (-10..+24) | not kept (CI includes 0) |
+| Futility margin 80 | 1600 @20k | +9 (-8..+26) | not kept (CI includes 0) |
+| LMP max depth 5 | 1600 @20k | -0 (-17..+17) | no change |
+
+The engine remains at a local optimum for these search/eval knobs at 20k
+nodes/move; the LMR re-search is the one change that repeated in the same
+direction at both fixed nodes and a fixed clock.
+
 ## Alpha (lightweight, `--no-default-features`)
 
 | Match (fixed `movetime`) | Score (Ferrum–SF) | Est. Elo | 95% CI |

@@ -639,6 +639,15 @@ impl Searcher {
                 }
             }
 
+            // SEE reads the mover on `from`, so it must be computed before
+            // the move is made. Only the optional ProbCut/capture-LMR paths
+            // need it; both are off by default, so the baseline pays nothing.
+            let m_see = if is_capture && (probcut_ok || self.sparams.lmr_captures > 0) {
+                see(board, &m)
+            } else {
+                0
+            };
+
             board.make_move(&m);
             if board.is_in_check(us) {
                 board.unmake_move();
@@ -651,7 +660,7 @@ impl Searcher {
             // searching the full move loop. A failed probe costs one
             // reduced search; a successful one prunes the whole subtree.
             // The TT move is always searched normally.
-            if probcut_ok && is_capture && Some(m) != tt_move && see(board, &m) >= 0 {
+            if probcut_ok && is_capture && Some(m) != tt_move && m_see >= 0 {
                 let r = self.sparams.probcut_r.max(1);
                 let beta_cut = beta + self.sparams.probcut_margin;
                 if depth > r && beta_cut < MATE - 1000 {
@@ -697,7 +706,7 @@ impl Searcher {
                         // stay full depth unless `lmr_pv` is on.
                         if self.sparams.lmr_captures > 0
                             && (!pv_node || self.sparams.lmr_pv > 0)
-                            && see(board, &m) < 0
+                            && m_see < 0
                         {
                             self.sparams.lmr_captures.min(new_depth - 1).max(0)
                         } else {
@@ -1130,7 +1139,14 @@ fn least_attacker(board: &Board, side: Color, to: u8, occ: u64) -> Option<(u8, i
 /// <0 loses. Used to prune hopeless captures in qsearch.
 fn see(board: &Board, m: &Move) -> i32 {
     if !m.is_capture && m.promo.is_none() { return 0; }
-    let attacker = match board.piece_on(m.from) { Some(p) => p, None => return 0 };
+    let attacker = match board.piece_on(m.from) {
+        Some(p) => p,
+        None => {
+            // The mover must still be on `from`: SEE is a pre-move test.
+            debug_assert!(false, "see() was called after make_move");
+            return 0;
+        }
+    };
     let victim = if m.is_en_passant {
         100
     } else {

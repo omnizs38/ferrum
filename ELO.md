@@ -564,6 +564,12 @@ suite (debug/release, both variants) and clippy are green.
 | Futility margin 80 | 1600 @20k | +9 (-8..+26) | not kept (CI includes 0) |
 | LMP max depth 5 | 1600 @20k | -0 (-17..+17) | no change |
 
+> ProbCut note: the first sweep ran before its SEE gate was hoisted above
+> `make_move`, so every capture qualified. The gate now works (and the same
+> pre-move-SEE fix makes the optional `lmr_captures` reduction effective),
+> but both remain off by default; the numbers above describe that earlier
+> run and would need re-testing if ProbCut were revisited.
+
 The engine remains at a local optimum for these search/eval knobs at 20k
 nodes/move; the LMR re-search is the one change that repeated in the same
 direction at both fixed nodes and a fixed clock.

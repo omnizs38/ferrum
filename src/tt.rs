@@ -2,11 +2,16 @@
 //!
 //! A simple power-of-two hash table mapping position hashes to search results:
 //! depth, score, bound flag, best move and age (search number). When the table
-//! is full, entries from older searches are replaced first. The table is
-//! shared between search threads (Gamma) behind a mutex; Alpha uses it
-//! single-threaded with a smaller default size.
+//! is full, entries from older searches are replaced first.
+//!
+//! The table is split into independently locked shards so Lazy SMP search
+//! threads rarely contend on the same mutex. Shard selection uses the high
+//! bits of the *slot index* and the low bits pick the entry inside the shard,
+//! so the hash -> slot mapping is exactly the one a single flat table would
+//! use. That keeps single-threaded search results node-identical.
 
 use crate::types::Move;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,17 +37,35 @@ impl Entry {
     }
 }
 
-/// Inner table, guarded by a mutex so several search threads can share it.
-struct Table {
+/// Target number of independently locked shards. 64 is enough that four
+/// search threads almost never touch the same lock, and the shards are
+/// cache-line aligned so unrelated locks do not false-share.
+const SHARD_COUNT: usize = 64;
+
+/// One independently locked slice of the table. Aligned so each shard's
+/// mutex and first entries sit on their own cache line.
+#[repr(align(64))]
+struct Shard {
     entries: Vec<Entry>,
-    mask: usize,
-    age: u8,
+}
+
+/// Inner table: a fixed set of shards plus the shared search age.
+struct Table {
+    shards: Vec<Mutex<Shard>>,
+    /// `entries per shard - 1`; the low bits of the slot index pick an entry.
+    shard_mask: usize,
+    /// log2(entries per shard): how far to shift a slot index to get the
+    /// shard number.
+    shard_shift: usize,
+    /// Search generation, shared by all shards. Only incremented by
+    /// `new_search`; read when stamping a store.
+    age: AtomicU8,
 }
 
 /// Thread-safe handle to the transposition table.
 #[derive(Clone)]
 pub struct TranspositionTable {
-    inner: Arc<Mutex<Table>>,
+    inner: Arc<Table>,
 }
 
 #[cfg(feature = "large-tt")]
@@ -71,7 +94,12 @@ pub fn default_hash_mb() -> usize {
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> TranspositionTable {
         let mut tt = TranspositionTable {
-            inner: Arc::new(Mutex::new(Table { entries: Vec::new(), mask: 0, age: 0 })),
+            inner: Arc::new(Table {
+                shards: Vec::new(),
+                shard_mask: 0,
+                shard_shift: 0,
+                age: AtomicU8::new(0),
+            }),
         };
         tt.resize(size_mb);
         tt
@@ -85,21 +113,40 @@ impl TranspositionTable {
         let count = raw.next_power_of_two();
         let count = if count > raw { count / 2 } else { count };
         let count = count.max(1024) as usize;
-        let mut lock = self.inner.lock().unwrap();
-        lock.entries = vec![Entry::empty(); count];
-        lock.mask = count - 1;
-        lock.age = 0;
+        // Keep at least 64 entries per shard; the count is a power of two,
+        // so the shard count and per-shard size stay powers of two too.
+        let shard_count = SHARD_COUNT.min(count / 64).max(1);
+        let shard_size = count / shard_count;
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(Mutex::new(Shard { entries: vec![Entry::empty(); shard_size] }));
+        }
+        self.inner = Arc::new(Table {
+            shards,
+            shard_mask: shard_size - 1,
+            shard_shift: shard_size.trailing_zeros() as usize,
+            age: AtomicU8::new(0),
+        });
+    }
+
+    /// The shard that owns `hash` and the entry index inside it. The full
+    /// slot index is `hash & (total_entries - 1)`; its high bits choose the
+    /// shard and its low bits choose the entry.
+    #[inline]
+    fn shard(&self, hash: u64) -> (&Mutex<Shard>, usize) {
+        let id = ((hash >> self.inner.shard_shift) as usize) & (self.inner.shards.len() - 1);
+        (&self.inner.shards[id], (hash as usize) & self.inner.shard_mask)
     }
 
     /// Start a new search generation (increments the age).
     pub fn new_search(&self) {
-        let mut lock = self.inner.lock().unwrap();
-        lock.age = lock.age.wrapping_add(1);
+        self.inner.age.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn probe(&self, hash: u64, depth: i32) -> Option<Entry> {
-        let lock = self.inner.lock().unwrap();
-        let e = &lock.entries[(hash & lock.mask as u64) as usize];
+        let (shard, idx) = self.shard(hash);
+        let lock = shard.lock().unwrap();
+        let e = &lock.entries[idx];
         if e.key == hash && e.depth >= depth {
             Some(*e)
         } else {
@@ -111,8 +158,9 @@ impl TranspositionTable {
     /// and the depth-sufficient entry (for cutoffs). Saves one mutex
     /// lock per non-PV node vs calling `probe_move` + `probe` separately.
     pub fn probe_both(&self, hash: u64, depth: i32) -> (Option<Move>, Option<Entry>) {
-        let lock = self.inner.lock().unwrap();
-        let e = &lock.entries[(hash & lock.mask as u64) as usize];
+        let (shard, idx) = self.shard(hash);
+        let lock = shard.lock().unwrap();
+        let e = &lock.entries[idx];
         if e.key != hash {
             return (None, None);
         }
@@ -121,8 +169,9 @@ impl TranspositionTable {
     }
 
     pub fn probe_move(&self, hash: u64) -> Option<Move> {
-        let lock = self.inner.lock().unwrap();
-        let e = &lock.entries[(hash & lock.mask as u64) as usize];
+        let (shard, idx) = self.shard(hash);
+        let lock = shard.lock().unwrap();
+        let e = &lock.entries[idx];
         if e.key == hash {
             e.best
         } else {
@@ -131,15 +180,16 @@ impl TranspositionTable {
     }
 
     pub fn store(&self, hash: u64, depth: i32, flag: Bound, score: i32, best: Option<Move>) {
-        let mut lock = self.inner.lock().unwrap();
-        let idx = (hash & lock.mask as u64) as usize;
+        let (shard, idx) = self.shard(hash);
+        let mut lock = shard.lock().unwrap();
+        let age = self.inner.age.load(Ordering::Relaxed);
         let old = &lock.entries[idx];
         // Replace if empty, older, or (same age and deeper/equal).
         let replace = old.key == 0
-            || old.age != lock.age
+            || old.age != age
             || depth >= old.depth;
         if replace {
-            lock.entries[idx] = Entry { key: hash, depth, flag, score, best, age: lock.age };
+            lock.entries[idx] = Entry { key: hash, depth, flag, score, best, age };
         }
     }
 }
@@ -161,5 +211,38 @@ mod tests {
         assert!(tt.probe(hash, 4).is_none());
         // Different hash misses.
         assert!(tt.probe(hash ^ 1, 1).is_none());
+    }
+
+    #[test]
+    fn entries_stay_compact() {
+        assert!(std::mem::size_of::<Entry>() <= 32);
+    }
+
+    #[test]
+    fn concurrent_shards_keep_their_entries() {
+        // 1 MB is 32768 slots: give every thread its own slice of low-bit
+        // slots, so the test exercises parallel locking without relying on
+        // collision behaviour. All hashes use low bits only.
+        let tt = TranspositionTable::new(1);
+        let mut handles = Vec::new();
+        for t in 0..4u64 {
+            let tt = tt.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..2048u64 {
+                    let hash = 1 + t * 4096 + i;
+                    tt.store(hash, 2, Bound::Exact, hash as i32, None);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        for t in 0..4u64 {
+            for i in 0..2048u64 {
+                let hash = 1 + t * 4096 + i;
+                let e = tt.probe(hash, 1).expect("entry survived");
+                assert_eq!(e.score, hash as i32);
+            }
+        }
     }
 }

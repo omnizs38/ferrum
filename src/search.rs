@@ -100,6 +100,10 @@ pub struct SearchParams {
     /// re-search only, which never re-searches a reduced cut-node move.
     /// Unreduced zero-window fail-highs are not re-searched twice: the
     /// repeat at the same depth and window would return the same score.
+    /// Measured 2026-11-18: +20 Elo over 1200 games and +8 over another
+    /// 1600 at 20k nodes (pooled +13, 95% CI ~[0,+26]), and +6 at a fixed
+    /// 50 ms clock over 800 games. Adopted as the default; 0 reproduces the
+    /// pre-2026-11-18 tree.
     pub lmr_research: i32,
     /// 1 = resolve captures at the horizon with quiescence; 0 = static eval
     /// (the pre-training Alpha behaviour). Exposed so training can A/B the
@@ -108,6 +112,11 @@ pub struct SearchParams {
     /// Maximum capture plies inside quiescence (0 = unlimited). A low cap
     /// keeps qsearch cheap on engines without null-move/LMR pruning.
     pub qs_max_plies: i32,
+    /// Quiescence SEE pruning threshold: captures with `SEE < -margin` are
+    /// skipped. 0 prunes every losing capture (the trained baseline).
+    pub qs_see_margin: i32,
+    /// Quiescence delta-pruning margin in centipawns (baseline 200).
+    pub qs_delta_margin: i32,
     /// Null-move reduction: `R = null_r_base + depth / null_r_div`.
     pub null_r_base: i32,
     pub null_r_div: i32,
@@ -117,6 +126,15 @@ pub struct SearchParams {
     /// reduced-depth search for a move to order first. 0 = off, otherwise
     /// the minimum depth at which it runs.
     pub iid_min_depth: i32,
+    /// ProbCut: at non-PV nodes, prove a cutoff above `beta + margin` with
+    /// a reduced search instead of the full move loop, using captures only.
+    /// 0 = off.
+    pub probcut_margin: i32,
+    /// Minimum depth at which ProbCut runs; it pays off at high depth, where
+    /// the reduced verifier is much cheaper than the full-width search.
+    pub probcut_min_depth: i32,
+    /// Plies subtracted from the depth for ProbCut's verifier.
+    pub probcut_r: i32,
 }
 
 impl Default for SearchParams {
@@ -132,6 +150,11 @@ impl SearchParams {
     /// Gamma: +160 Elo (CI +131..+193) at 20k nodes/move over 600 paired
     /// games vs all-off, and +77 Elo (CI +43..+113) at 80k nodes/move over
     /// 400 games.
+    ///
+    /// 2026-11-18: standard LMR re-search at cut nodes is on
+    /// (`lmr_research=1`), measured +13 Elo pooled over 2800 games at 20k
+    /// nodes and +6 at a fixed 50 ms clock. It costs nodes (the bench tree
+    /// changes) but wins at both fixed nodes and fixed time.
     ///
     /// Alpha: +160 Elo at a fixed 50 ms clock over 200 games vs all-off, and
     /// qsearch adds another +98 Elo (CI +50..+151) once the prunings pay for
@@ -150,13 +173,18 @@ impl SearchParams {
         lmr_pv: 0,
         lmr_captures: 0,
         lmr_fail_threshold: 0,
-        lmr_research: 0,
+        lmr_research: 1,
         qsearch: 1,
         qs_max_plies: 0,
+        qs_see_margin: 0,
+        qs_delta_margin: 200,
         null_r_base: 2,
         null_r_div: 4,
         asp_delta: 50,
         iid_min_depth: 0,
+        probcut_margin: 0,
+        probcut_min_depth: 5,
+        probcut_r: 4,
     };
 
     // Keys, `set` and `get` are generated from this one field list.
@@ -165,8 +193,9 @@ impl SearchParams {
         lmp_base, lmp_max_depth, lmr_div,
         lmr_base, lmr_min_depth, lmr_pv, lmr_captures,
         lmr_fail_threshold, lmr_research,
-        qsearch, qs_max_plies,
-        null_r_base, null_r_div, asp_delta, iid_min_depth
+        qsearch, qs_max_plies, qs_see_margin, qs_delta_margin,
+        null_r_base, null_r_div, asp_delta, iid_min_depth,
+        probcut_margin, probcut_min_depth, probcut_r
     );
 
     pub fn from_spec(spec: &str) -> Result<SearchParams, String> {
@@ -452,13 +481,19 @@ impl Searcher {
         self.nodes += 1;
 
         let in_check = board.is_in_check(board.side);
+        // Static evaluation is lazy and cached for the whole node: razoring,
+        // reverse futility, null-move and per-move futility all ask for the
+        // same position, and depth-1 nodes used to re-evaluate once per
+        // quiet move. The board is untouched until a move is made, so one
+        // value is valid throughout. This is node-identical, only faster.
+        let mut static_eval: Option<i32> = None;
         // Razoring (Gamma only): at very low depth, a position whose static
         // evaluation is hopeless against beta has no future in the full
         // search — drop straight into qsearch. `pv_node` is excluded so the
         // principal variation is never truncated.
         #[cfg(feature = "qsearch")]
         if depth <= 2 && !pv_node && !in_check {
-            let sp = evaluate_with(board, &self.params);
+            let sp = *static_eval.get_or_insert_with(|| evaluate_with(board, &self.params));
             if sp + 250 < beta {
                 return (self.qsearch(board, alpha, beta, ply, 0), None);
             }
@@ -488,7 +523,7 @@ impl Searcher {
         if !pv_node && !in_check && self.sparams.rfp_margin > 0
             && depth <= self.sparams.rfp_max_depth
         {
-            let sp = evaluate_with(board, &self.params);
+            let sp = *static_eval.get_or_insert_with(|| evaluate_with(board, &self.params));
             if sp - self.sparams.rfp_margin * depth >= beta {
                 return (sp, None);
             }
@@ -514,7 +549,7 @@ impl Searcher {
         // full, which is both slower and weaker (by design).
         #[cfg(feature = "qsearch")]
         if allow_null && !pv_node && !in_check && depth >= 3 && has_non_pawn_material(board) {
-            let eval = evaluate_with(board, &self.params);
+            let eval = *static_eval.get_or_insert_with(|| evaluate_with(board, &self.params));
             if eval >= beta {
                 let saved_side = board.side;
                 let saved_ep = board.ep_square;
@@ -568,6 +603,17 @@ impl Searcher {
         #[cfg(feature = "qsearch")]
         let mut quiet_fails = 0i32;
 
+        // ProbCut gate (trainable, off by default). It is a selective
+        // cutoff, so it only runs away from PV nodes, checks and mate
+        // windows, and not in the first few plies where a shallow proof
+        // would shape the whole line.
+        let probcut_ok = self.sparams.probcut_margin > 0
+            && !pv_node
+            && !in_check
+            && ply >= 3
+            && depth >= self.sparams.probcut_min_depth
+            && beta < MATE - 1000;
+
         self.path_hashes.push(board.hash);
         for i in 0..moves.len() {
             let m = moves[i];
@@ -586,7 +632,7 @@ impl Searcher {
                     continue;
                 }
                 if self.sparams.futility_margin > 0 && depth == 1 {
-                    let se = evaluate_with(board, &self.params);
+                    let se = *static_eval.get_or_insert_with(|| evaluate_with(board, &self.params));
                     if se + self.sparams.futility_margin <= alpha {
                         continue;
                     }
@@ -599,6 +645,33 @@ impl Searcher {
                 continue; // illegal: leaves own king in check
             }
             legal_moves += 1;
+
+            // ProbCut: a capture that wins material statically is a good
+            // candidate to prove a cutoff above `beta + margin` without
+            // searching the full move loop. A failed probe costs one
+            // reduced search; a successful one prunes the whole subtree.
+            // The TT move is always searched normally.
+            if probcut_ok && is_capture && Some(m) != tt_move && see(board, &m) >= 0 {
+                let r = self.sparams.probcut_r.max(1);
+                let beta_cut = beta + self.sparams.probcut_margin;
+                if depth > r && beta_cut < MATE - 1000 {
+                    let (s, _) = self.negamax(
+                        board,
+                        depth - r,
+                        -beta_cut,
+                        -beta_cut + 1,
+                        ply + 1,
+                        false,
+                        true,
+                    );
+                    let score = -s;
+                    if !self.should_stop() && score >= beta_cut {
+                        board.unmake_move();
+                        self.path_hashes.pop();
+                        return (score, Some(m));
+                    }
+                }
+            }
 
             let new_depth = depth - 1;
             let mut score: i32;
@@ -675,9 +748,9 @@ impl Searcher {
                 // Standard LMR verification: a reduced probe that beats
                 // alpha is re-searched at full depth. At a zero-window cut
                 // node (beta = alpha+1) `score < beta` can never hold, so
-                // the historical in-window test skipped every such
-                // re-search; `lmr_research=1` restores it. The old test
-                // stays the default so existing specs remain reproducible.
+                // the old in-window test skipped every such re-search;
+                // `lmr_research=1` (the default since 2026-11-18) restores
+                // it. 0 keeps the older in-window-only rule for A/Bs.
                 let research = if self.sparams.lmr_research > 0 {
                     score > alpha && (reduce > 0 || score < beta)
                 } else {
@@ -780,7 +853,14 @@ impl Searcher {
             return evaluate_with(board, &self.params);
         }
         let in_check = board.is_in_check(board.side);
-        let stand_pat = evaluate_with(board, &self.params);
+        // Stand-pat is only meaningful outside check: in check the side to
+        // move may not "pass", so its value is never read there. Skipping
+        // the evaluation on check nodes removes a whole eval per qnode.
+        let stand_pat = if in_check {
+            -INF
+        } else {
+            evaluate_with(board, &self.params)
+        };
         if !in_check {
             if stand_pat >= beta {
                 return beta;
@@ -805,7 +885,7 @@ impl Searcher {
             // winning promotion would be pruned at a high alpha.
             let victim = captured_value_from_board(board, &m);
             let promo_gain = if m.promo.is_some() { 800 } else { 0 };
-            if !in_check && stand_pat + victim + promo_gain + 200 < alpha {
+            if !in_check && stand_pat + victim + promo_gain + self.sparams.qs_delta_margin < alpha {
                 continue;
             }
             // SEE pruning: skip captures that lose material in a static
@@ -814,7 +894,7 @@ impl Searcher {
             // without deep search — tactics that win material (SEE >= 0)
             // are always searched. Shared by both variants: it is what keeps
             // quiescence cheap enough to pay for its depth cost.
-            if !in_check && see(board, &m) < 0 {
+            if !in_check && see(board, &m) < -self.sparams.qs_see_margin.max(0) {
                 continue;
             }
             board.make_move(&m);
@@ -1183,6 +1263,20 @@ mod tests {
         search_position(&mut b, &[], &SearchLimits::fixed_depth(depth), &tt)
     }
 
+    fn search_fen_with(fen: &str, depth: i32, spec: &str) -> SearchInfo {
+        let mut b = Board::from_fen(fen).unwrap();
+        let tt = TranspositionTable::new(8);
+        let sp = SearchParams::from_spec(spec).unwrap();
+        search_position_with_settings(
+            &mut b,
+            &[],
+            &SearchLimits::fixed_depth(depth),
+            &tt,
+            EvalParams::DEFAULT,
+            sp,
+        )
+    }
+
     #[test]
     fn mate_in_one() {
         // White to play and mate: Qxf7# (from the Scholar's mate pattern).
@@ -1202,6 +1296,26 @@ mod tests {
         let info = search_position(&mut b, &[], &SearchLimits::fixed_depth(2), &tt);
         let best = info.best_move.unwrap();
         assert_eq!(best.to_uci(), "c7a8", "expected Nxa8 (win queen), got {}", best.to_uci());
+    }
+
+    #[test]
+    fn optional_search_knobs_keep_mate_and_legality() {
+        // ProbCut is off by default; switching it on must still find
+        // Qxf7# and return a legal root move.
+        let info = search_fen_with(
+            "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 1",
+            5,
+            "probcut_margin=200",
+        );
+        assert_eq!(info.best_move.map(|m| m.to_uci()), Some("h5f7".to_string()));
+        assert!(info.score > MATE - 100, "score {} should be mate", info.score);
+
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let mut b = Board::from_fen(fen).unwrap();
+        let legal = b.generate_legal_moves();
+        let info = search_fen_with(fen, 6, "probcut_margin=150");
+        let best = info.best_move.expect("root move");
+        assert!(legal.iter().any(|m| *m == best), "illegal best move {}", best.to_uci());
     }
 
     #[test]

@@ -15,7 +15,7 @@ aspirational labels). Everything here is checkable: `src/`, `results/`,
 | Evaluation | tapered MG/EG material + PST (maintained incrementally in `Board::mg_scores/eg_scores`), plus mobility, pawn structure (passed/doubled/isolated/connected/blocked), bishop pair, rook open/semi files, king pawn-shield, loose-material hunt, trapped pieces, enemy-king pressure | material + a **single** PST (the shared `PST`, no EG taper) plus a king pawn-shield bonus, an own-loose-material penalty, tempo, cheap knight/bishop mobility, passed pawns and bishop pair |
 | Threads / SMP | Lazy SMP (main + helpers, detached; helps at 200–500 ms, hurts at 1 ms, games split asymmetrically) | single-thread |
 | TT | single-entry table, single-lock `probe_both`, age-based replacement | same structure, 8 MB |
-| Depth 8 (bench) | ~18777 nodes | 216764 nodes (more nodes, cheaper eval) |
+| Depth 8 (bench) | ~19951 nodes | 216764 nodes (more nodes, cheaper eval) |
 
 ## The "trap-based" and "defensive" labels — verified, then implemented
 

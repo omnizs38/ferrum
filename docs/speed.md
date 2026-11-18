@@ -44,9 +44,11 @@ the portable default build and the native build. Raw JSON:
 
 ## What was sped up this session
 
-All changes are **node-identical** (Gamma startpos d8 stays at 18,777
-nodes, Alpha at 216,764), so strength is unchanged; only time per node
-improved. Measured with the same fixed-node method over 5M nodes:
+All changes are **node-identical** (Gamma startpos d8 stayed at 18,777
+nodes when they landed, Alpha at 216,764), so strength was unchanged; only
+time per node improved. (The current tree reports Gamma d8 19,951 after the
+2026-11-18 LMR re-search default; see `ELO.md`.) Measured with the same
+fixed-node method over 5M nodes:
 
 | Change | Gain |
 |---|---|
@@ -58,6 +60,32 @@ improved. Measured with the same fixed-node method over 5M nodes:
 
 The combined speedup over the starting build is ~1.24x for Gamma; Alpha
 gains from the null-move hash and the native build.
+
+### 2026-11-18: evaluation caching (node-identical)
+
+Two hot-path cleanups. Both were **node-identical** when they landed (Gamma
+d8 18,777 nodes and Alpha 216,764, tactics suite unchanged; the separate LMR
+re-search default is what moves the current Gamma bench to 19,951):
+
+* `negamax` computes the static evaluation lazily and at most once per node.
+  Razoring, reverse futility, null-move pruning and depth-1 futility all read
+  the same value; depth-1 nodes previously paid one full evaluation per
+  quiet move.
+* qsearch no longer computes the stand-pat evaluation when in check, where
+  the value is never read.
+
+`tools/speed.py` with a fixed 2,000,000-node budget (one thread, 64 MB hash,
+interleaved positions):
+
+| Build | Median NPS | Time for 2M nodes |
+|---|---|---|
+| before | 1,381,956 | 1,460 ms |
+| after | 1,545,006 | 1,305 ms |
+| ratio | **1.12x** | **0.89x** |
+
+At a fixed 100 ms clock the middlegame position reached **depth 8 instead of
+depth 7** (depth sum 36 vs 35 across the four positions), which is the point:
+the same clock buys a deeper search.
 
 ### Why the native build helps
 

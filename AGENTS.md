@@ -42,7 +42,7 @@ cargo clippy --all-targets -- -D warnings     # currently clean
 - `tests/uci_smoke.rs` spawns the real binary via `CARGO_BIN_EXE_ferrum`.
   Changing stdout, threading or command ordering can break it.
 - Benchmarks must be release builds. `cargo run --release --example bench`
-  prints startpos nodes by depth; current Gamma d8 baseline is 18777 nodes
+  prints startpos nodes by depth; current Gamma d8 baseline is 19951 nodes
   (Alpha d8 is 216764: it has a cheaper eval and no null-move/LMR). Report
   the node delta for search/eval changes, and use `examples/tactics.rs` for
   mate/material sanity checks.
@@ -100,7 +100,7 @@ cargo clippy --all-targets -- -D warnings     # currently clean
   is the canonical benchmark: identical node counts, interleaved engines,
   wall-clock time. Never compare NPS from separate, non-interleaved runs.
 - Speed changes must stay node-identical (`cargo run --release --example bench`
-  keeps Gamma d8 at 18777 and Alpha d8 at 216764). If the tree changes, A/B
+  keeps Gamma d8 at 19951 and Alpha d8 at 216764). If the tree changes, A/B
   strength in-process before keeping it.
 - The default build is portable; `RUSTFLAGS="-C target-cpu=native"` is the
   recommended server/benchmark build (the Dockerfile defaults to it).

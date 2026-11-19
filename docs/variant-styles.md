@@ -11,7 +11,7 @@ aspirational labels). Everything here is checkable: `src/`, `results/`,
 | Cargo features | `gamma = threads + qsearch + advanced-eval + large-tt` (64 MB TT) | none (8 MB TT) |
 | Move generation | `src/board.rs` — bitboards (`src/bitboard.rs`) + occupied-ray sliders via occupancy-indexed tables (`src/sliders.rs`) | identical |
 | Legality | pseudo-legal + king-safety filter, `is_in_check` via attack tests | identical |
-| Search | negamax + PVS, iterative deepening, aspiration windows (±50, re-centred), null-move pruning (`R = 2 + depth/4`), late-move reduction, qsearch (stand-pat, delta+SEE pruning), check extension capped at 12, reverse futility, LMP, depth-1 futility | negamax + PVS, iterative deepening, qsearch (stand-pat, delta+SEE pruning), reverse futility, LMP, depth-1 futility; **no null-move, no LMR, no razoring, no aspiration** |
+| Search | negamax + PVS, iterative deepening, aspiration windows (±50, re-centred), null-move pruning (`R = 2 + depth/4`), late-move reduction, qsearch (stand-pat, delta+SEE pruning), check extension capped at 12, reverse futility, LMP, depth-1 futility | negamax + PVS, iterative deepening, aspiration windows (±50, re-centred), qsearch (stand-pat, delta+SEE pruning), reverse futility, LMP, depth-1 futility; **no null-move, no LMR, no razoring** |
 | Evaluation | tapered MG/EG material + PST (maintained incrementally in `Board::mg_scores/eg_scores`), plus mobility, pawn structure (passed/doubled/isolated/connected/blocked), bishop pair, rook open/semi files, king pawn-shield, loose-material hunt, trapped pieces, enemy-king pressure | material + a **single** PST (the shared `PST`, no EG taper) plus a king pawn-shield bonus, an own-loose-material penalty, tempo, cheap knight/bishop mobility, passed pawns and bishop pair |
 | Threads / SMP | Lazy SMP (main + helpers, detached; helps at 200–500 ms, hurts at 1 ms, games split asymmetrically) | single-thread |
 | TT | single-entry table, single-lock `probe_both`, age-based replacement | same structure, 8 MB |
@@ -37,7 +37,7 @@ The labels are now **implemented and measured** (WIP-through the code):
 * Gamma advanced-eval: loose-material hunting bonus (attacked more than
   defended with profit: `loose_material(side) * 8/100` cp). A/B vs base:
   30 g @100 ms: **7–3–20, +47** (CI [−78,185]); earlier iteration measured
-  +83 with the same conclusion. Unit test: `attackers_count_and_loose_material_work`.
+  +83 with the same conclusion. Unit test: `loose_material_scan_works`.
 * Alpha simple-eval: king pawn-shield bonus (8 cp/pawn, cap 3 → +24):
   value covered castled positions. A/B vs base: 30 g @100 ms: **7–11–12, −47**
   (CI [−185,78]), within noise of base. A naive loose-piece penalty
@@ -66,7 +66,7 @@ only emergent:
   cheaper-enough attacker (defenders == 0 → hanging to anyone; otherwise at
   least one attacker of value ≤ victim). This is the closest classical-eval
   equivalent of "attack the hanging things". Verified: unit test
-  `attackers_count_and_loose_material_work`; A/B vs base at 100 ms,
+  `loose_material_scan_works`; A/B vs base at 100 ms,
   30 games: **7–3–20, +47** (CI [−78,185]) — positive direction in line
   with an earlier implementation of the same idea measured twice
   (+83, +47).

@@ -293,7 +293,7 @@ every tested TC.**
   N/B/R/Q attacked more than defended **and** profitably capturable
   (defenders == 0 → any attacker counts; otherwise at least one cheap
   attacker of value ≤ victim). Unit test:
-  `attackers_count_and_loose_material_work`. A/B vs base, 30 g @100 ms:
+  `loose_material_scan_works`. A/B vs base, 30 g @100 ms:
   **7–3–20, +47** (CI [−78,185]); earlier independent sample of the
   same idea: +83. Kept.
 - **Alpha "defensive"** — simple-eval gains a king pawn-shield bonus:
@@ -303,7 +303,7 @@ every tested TC.**
   the shield bonus measures **7–11–12, −47** (CI [−185,78]) vs base —
   within noise of base. Kept (it delivers the defensive identity
   without materially weakening Alpha). Unit test:
-  `attackers_count_and_loose_material_work` covers the shared counter.
+  `loose_material_scan_works` covers the shared counter.
 
 Full write-up and verdicts in `docs/variant-styles.md`. The Gamma-Alpha
 ladder is unchanged in spirit: Gamma≈1800–1900 vs SF 2000, Alpha≈1500,

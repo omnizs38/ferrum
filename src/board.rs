@@ -623,8 +623,7 @@ impl Board {
         let start_rank: u8 = match us { Color::White => 1, Color::Black => 6 };
         let promo_rank: u8 = match us { Color::White => 6, Color::Black => 1 };
         let last_rank: u8 = match us { Color::White => 7, Color::Black => 0 };
-        let pawns_bb = piece_bb(PieceType::Pawn);
-        let mut pawns = pawns_bb;
+        let mut pawns = piece_bb(PieceType::Pawn);
         while pawns != 0 {
             let (sq, rest) = pop_lsb(pawns);
             pawns = rest;

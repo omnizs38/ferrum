@@ -12,14 +12,14 @@ The two objectives driving the work:
 
 Measured results are in [`ELO.md`](../ELO.md) and the style anatomy is in
 [`variant-styles.md`](variant-styles.md). The goals are long-term: current
-measurements at 300 ms are ≈1870 (Alpha) and ≈1930 (Gamma).
+measurements at 300 ms are ≈2100 (Alpha, 2026-11-16 pass) and ≈1930 (Gamma).
 
 ## The three pieces
 
 ### 1. Trainable weights (`src/eval.rs`, `src/search.rs`)
 
-Every positional weight is a field of `eval::EvalParams` (34 knobs) and every
-optional pruning/limit is a field of `search::SearchParams` (12 knobs). The
+Every positional weight is a field of `eval::EvalParams` and every optional
+pruning/limit is a field of `search::SearchParams`. The
 `DEFAULT` constants are the trained baseline; a spec string overrides them:
 
 ```
@@ -70,10 +70,11 @@ length, and the style table. `--json` writes the same data.
 
 Builds the example for the requested variant itself and runs two phases:
 
-1. **SPSA** over all `EvalParams` with paired games as the objective
-   (`--mode spsa`). Every iteration perturbs all coordinates in a random
-   direction, plays the two perturbed sets against each other, and moves
-   the parameters along the observed score gradient. Steps decay.
+1. **SPSA** over the variant's key table in `tools/train.py`
+   (`GAMMA_PARAMS` / `ALPHA_PARAMS`), with paired games as the objective
+   (`--mode spsa`). Every iteration perturbs the selected coordinates in a
+   random direction, plays the two perturbed sets against each other, and
+   moves the parameters along the observed score gradient. Steps decay.
 2. **Style search** (`--mode style`): with strength roughly fixed, try a
    small grid of style weights, keep the candidate with the best
    `style_index` provided it does not lose strength (`--style-floor`).

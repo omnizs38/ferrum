@@ -1,8 +1,9 @@
 //! Static evaluation.
 //!
 //! The Alpha build (`--no-default-features`) uses a *simple* evaluation:
-//! material plus a single piece-square table, a defensive king-shield term
-//! and (when trained non-zero) defensive king-danger / own-loose terms.
+//! material plus a single piece-square table, a defensive king-shield term,
+//! own-loose/danger terms, cheap knight/bishop mobility, passed pawns, the
+//! bishop pair, a castled-king bonus and tempo.
 //! The Gamma build adds *advanced* evaluation (feature `advanced-eval`):
 //! tapered middlegame / endgame scores, mobility, pawn structure, bishop
 //! pair, rook files and king safety on top of the same piece-square tables.
@@ -201,12 +202,12 @@ fn pst_index(sq: u8, color: Color) -> usize {
 
 // ------------------------------------------------------------- EvalParams
 
-/// Every tunable positional weight. `DEFAULT` is the hand-written baseline
+/// Every tunable positional weight. `DEFAULT` is the trained baseline
 /// (measured in `ELO.md`); the training tools search around it.
 ///
 /// Units: centipawns per unit, except `*_scale` fields which are percent of
-/// the underlying base value. `DEFAULT` is the trained baseline; individual
-/// style terms can be zeroed to reproduce the pre-training engine.
+/// the underlying base value. Individual style terms can be zeroed to
+/// reproduce the pre-training engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvalParams {
     // --- Gamma advanced evaluation (also read by Alpha where marked) ---
@@ -246,23 +247,23 @@ pub struct EvalParams {
     /// King-attack units: cp per weighted enemy attack on our king ring
     /// (king square plus its neighbours). Each ring square hit is weighted
     /// by the attacker: pawn 1, knight 2, bishop 2, rook 3, queen 5;
-    /// the total is capped at 40 units. Middlespiel only, so the existing
+    /// the total is capped at 40 units. Middlegame only, so the existing
     /// `taper` fades it out with the queen/rook phase.
     pub king_attack_units: i32,
     /// cp per *distinct* enemy piece attacking our king ring (a "second
-    /// wave" bonus on top of `king_attack_units`). Middlespiel only.
+    /// wave" bonus on top of `king_attack_units`). Middlegame only.
     pub king_attack_count: i32,
     /// Extra percent scaling of `king_attack_units` per enemy queen on the
-    /// board (0 = off, 100 = double with one queen). Middlespiel only.
+    /// board (0 = off, 100 = double with one queen). Middlegame only.
     pub king_queen_scale: i32,
     /// Penalty when the king's own file has no own pawn (open file next to
-    /// the king). Middlespiel only.
+    /// the king). Middlegame only.
     pub king_open_file: i32,
-    /// Penalty per file adjacent to the king with no own pawn. Middlespiel
+    /// Penalty per file adjacent to the king with no own pawn. Middlegame
     /// only.
     pub king_open_adjacent: i32,
     /// Penalty for a king on the d/e file (uncastled or wandering king).
-    /// Middlespiel only.
+    /// Middlegame only.
     pub king_center: i32,
     // --- Alpha simple evaluation style terms ---
     /// Defensive: cp per own pawn in the three squares in front of the king.
@@ -288,12 +289,12 @@ pub struct EvalParams {
     pub alpha_rook: i32,
     pub alpha_queen: i32,
     // --- shared ---
-    /// Tempo bonus for the side to move (0 = off in the baseline).
+    /// Tempo bonus for the side to move (0 = off).
     pub tempo: i32,
 }
 
 impl EvalParams {
-    /// Hand-written baseline, updated with the 2026-11-15 training run:
+    /// Trained baseline (2026-11-15 run):
     /// * `alpha_own_loose = 24` — Alpha's defensive term measured +47 Elo
     ///   at 80k nodes/move (95% CI +13..+82) and cut its own hanging material
     ///   from 57.2 to 40.5 cp on average.
@@ -377,28 +378,6 @@ impl EvalParams {
         alpha_pawn, alpha_knight, alpha_bishop, alpha_rook, alpha_queen,
         tempo
     );
-
-    /// Parse `key=value,key=value` (commas or semicolons). An empty spec is
-    /// the baseline. Values are plain integers.
-    pub fn from_spec(spec: &str) -> Result<EvalParams, String> {
-        let mut p = EvalParams::DEFAULT;
-        crate::params::parse_spec(spec, |k, v| p.set(k, v))?;
-        Ok(p)
-    }
-
-    /// Serialise every parameter (stable key order, suitable for logs).
-    pub fn to_spec(&self) -> String {
-        let mut out = String::new();
-        for &key in Self::KEYS {
-            if !out.is_empty() {
-                out.push(',');
-            }
-            out.push_str(key);
-            out.push('=');
-            out.push_str(&self.get(key).to_string());
-        }
-        out
-    }
 }
 
 impl Default for EvalParams {
@@ -416,21 +395,16 @@ pub fn evaluate(board: &Board) -> i32 {
 /// Positive = side to move is better.
 pub fn evaluate_with(board: &Board, p: &EvalParams) -> i32 {
     #[cfg(feature = "advanced-eval")]
-    {
+    let score = {
         // One pressure scan serves both colours: attack tables for a square
         // are built once instead of once per evaluation side.
         let pressure = Pressure::scan(board, p);
         let white = evaluate_color(board, Color::White, &pressure, p);
         let black = evaluate_color(board, Color::Black, &pressure, p);
-        let score = white - black;
-        let stm = match board.side {
-            Color::White => score,
-            Color::Black => -score,
-        };
-        stm + p.tempo
-    }
+        white - black
+    };
     #[cfg(not(feature = "advanced-eval"))]
-    {
+    let score = {
         let value = [
             p.alpha_pawn,
             p.alpha_knight,
@@ -450,19 +424,28 @@ pub fn evaluate_with(board: &Board, p: &EvalParams) -> i32 {
             }
         }
         // Alpha "defensive" playstyle terms. Each is skipped when its weight
-        // is zero so the baseline pays nothing for the machinery.
-        score += alpha_style(board, Color::White, p);
-        score -= alpha_style(board, Color::Black, p);
-        let stm = match board.side {
-            Color::White => score,
-            Color::Black => -score,
+        // is zero so the baseline pays nothing for the machinery. The loose
+        // scan covers both colours at once: it used to run inside
+        // `alpha_style`, i.e. once per side, doubling the costliest term.
+        let loose = if p.alpha_own_loose != 0 {
+            loose_material_by_owner(board)
+        } else {
+            [0, 0]
         };
-        stm + p.tempo
-    }
+        score += alpha_style(board, Color::White, p, &loose);
+        score -= alpha_style(board, Color::Black, p, &loose);
+        score
+    };
+    // Scores are White-relative inside the blocks; negamax needs side-to-move.
+    let stm = match board.side {
+        Color::White => score,
+        Color::Black => -score,
+    };
+    stm + p.tempo
 }
 
 #[cfg(not(feature = "advanced-eval"))]
-fn alpha_style(board: &Board, color: Color, p: &EvalParams) -> i32 {
+fn alpha_style(board: &Board, color: Color, p: &EvalParams, loose: &[i32; 2]) -> i32 {
     let mut s = shield_bonus(board, color, p.alpha_shield);
     s += alpha_mobility(board, color, p);
     if p.alpha_bishop_pair != 0
@@ -478,17 +461,13 @@ fn alpha_style(board: &Board, color: Color, p: &EvalParams) -> i32 {
         s -= king_ring_attacks(board, color) * p.alpha_king_danger;
     }
     if p.alpha_own_loose != 0 {
-        let loose = loose_material_by_owner(board)
-            .get(color.idx())
-            .copied()
-            .unwrap_or(0);
-        s -= loose * p.alpha_own_loose / 100;
+        s -= loose[color.idx()] * p.alpha_own_loose / 100;
     }
     s
 }
 
 /// Alpha's cheap mobility: knight and bishop moves that do not land on an
-/// own piece. Off by default, and far cheaper than Gamma's full mobility.
+/// own piece. Far cheaper than Gamma's full mobility.
 #[cfg(not(feature = "advanced-eval"))]
 fn alpha_mobility(board: &Board, color: Color, p: &EvalParams) -> i32 {
     if p.alpha_mob_knight == 0 && p.alpha_mob_bishop == 0 {
@@ -930,7 +909,9 @@ impl Pressure {
     /// style weight is active. Zero-weight style terms cost nothing.
     fn scan(board: &Board, p: &EvalParams) -> Pressure {
         let mut out = Pressure::default();
-        let need_loose = p.pressure_scale != 0 || p.alpha_own_loose != 0;
+        // Alpha computes its own-loose term through `loose_material_by_owner`
+        // directly, so only Gamma's pressure weight can require this pass.
+        let need_loose = p.pressure_scale != 0;
         let need_trapped = p.trap_bonus != 0;
         let need_king_attack = p.king_attack_units != 0 || p.king_attack_count != 0;
         let need_ring = p.king_pressure != 0 || p.king_danger != 0 || need_king_attack;
@@ -963,15 +944,7 @@ impl Pressure {
                 0
             };
             let a_pawns_bb = board.pieces[ab];
-            let a_knights_bb = board.pieces[ab + 1];
-            let a_bishops_bb = board.pieces[ab + 2];
-            let a_rooks_bb = board.pieces[ab + 3];
-            let a_queens_bb = board.pieces[ab + 4];
-            let o_pawns_bb = board.pieces[ob];
-            let o_knights_bb = board.pieces[ob + 1];
-            let o_bishops_bb = board.pieces[ob + 2];
-            let o_rooks_bb = board.pieces[ob + 3];
-            let o_queens_bb = board.pieces[ob + 4];
+            let loose_side = need_loose.then(|| LooseSide::new(board, owner));
 
             if need_ring {
                 // Pawn pressure is cheap and completes the ring.
@@ -1035,62 +1008,149 @@ impl Pressure {
                             out.ring_attackers[owner.idx()] += 1;
                         }
                     }
-                    if !need_loose {
-                        continue;
-                    }
-                    // Attacker's attacks on the target square, computed once
-                    // and reused for the count and the cheap-attacker test.
-                    let a_pawns = pawn_attackers_to(sq, attacker) & a_pawns_bb;
-                    let a_knights = knight_attacks(sq) & a_knights_bb;
-                    let a_diag = bishop_attacks(sq, occ) & (a_bishops_bb | a_queens_bb);
-                    let a_straight = rook_attacks(sq, occ) & (a_rooks_bb | a_queens_bb);
-                    let a_king = king_attacks(sq) & board.pieces[ab + 5];
-                    let attackers = popcount(a_pawns | a_knights | a_diag | a_straight | a_king) as i32;
-                    if attackers == 0 {
-                        continue;
-                    }
-                    // Count defenders, stopping as soon as they match the
-                    // attackers (only "attacked more than defended" matters).
-                    let mut defenders = popcount(pawn_attackers_to(sq, owner) & o_pawns_bb) as i32;
-                    if defenders < attackers {
-                        defenders += popcount(knight_attacks(sq) & o_knights_bb) as i32;
-                    }
-                    if defenders < attackers {
-                        defenders += popcount(king_attacks(sq) & board.pieces[ob + 5]) as i32;
-                    }
-                    if defenders < attackers {
-                        defenders += popcount(bishop_attacks(sq, occ) & (o_bishops_bb | o_queens_bb)) as i32;
-                    }
-                    if defenders < attackers {
-                        defenders += popcount(rook_attacks(sq, occ) & (o_rooks_bb | o_queens_bb)) as i32;
-                    }
-                    if attackers <= defenders {
-                        continue;
-                    }
-                    // Only a piece the attacker can profitably take is loose:
-                    // undefended, or attacked by something no more valuable.
-                    let cheap = if defenders == 0 {
-                        1
-                    } else {
-                        let mut c = popcount(a_pawns) as i32;
-                        if value >= 320 {
-                            c += popcount(a_knights) as i32;
-                        }
-                        if value >= 330 {
-                            c += popcount(a_diag) as i32;
-                        }
-                        if value >= 500 {
-                            c += popcount(a_straight) as i32;
-                        }
-                        c
-                    };
-                    if cheap > 0 {
-                        out.loose[owner.idx()] += value;
+                    if let Some(loose_side) = &loose_side {
+                        out.loose[owner.idx()] += loose_side.piece_value(sq, value);
                     }
                 }
             }
         }
         out
+    }
+}
+
+/// The attacker/defender piece sets one side's loose-material pass needs,
+/// loaded once. [`Pressure::scan`] calls [`LooseSide::piece_value`] from the
+/// per-piece loop it already runs, so Gamma pays nothing extra; Alpha's
+/// [`loose_material_by_owner`] uses [`LooseSide::total`] and skips the
+/// mobility, trapped-piece and king-ring work entirely.
+struct LooseSide {
+    occ: u64,
+    owner: Color,
+    attacker: Color,
+    a_pawns: u64,
+    a_knights: u64,
+    a_diag: u64,
+    a_straight: u64,
+    a_king: u64,
+    o_pawns: u64,
+    o_knights: u64,
+    // Only Alpha's `total` walks the owner's pieces by kind; Gamma's scan
+    // reads the combined `o_diag` / `o_straight` sets instead.
+    #[cfg(any(not(feature = "advanced-eval"), test))]
+    o_bishops: u64,
+    #[cfg(any(not(feature = "advanced-eval"), test))]
+    o_rooks: u64,
+    #[cfg(any(not(feature = "advanced-eval"), test))]
+    o_queens: u64,
+    o_king: u64,
+    o_diag: u64,
+    o_straight: u64,
+}
+
+impl LooseSide {
+    fn new(board: &Board, owner: Color) -> LooseSide {
+        let attacker = owner.other();
+        let ab = attacker.idx() * 6;
+        let ob = owner.idx() * 6;
+        let o_bishops = board.pieces[ob + 2];
+        let o_rooks = board.pieces[ob + 3];
+        let o_queens = board.pieces[ob + 4];
+        LooseSide {
+            occ: board.occupied,
+            owner,
+            attacker,
+            a_pawns: board.pieces[ab],
+            a_knights: board.pieces[ab + 1],
+            a_diag: board.pieces[ab + 2] | board.pieces[ab + 4],
+            a_straight: board.pieces[ab + 3] | board.pieces[ab + 4],
+            a_king: board.pieces[ab + 5],
+            o_pawns: board.pieces[ob],
+            o_knights: board.pieces[ob + 1],
+            #[cfg(any(not(feature = "advanced-eval"), test))]
+            o_bishops,
+            #[cfg(any(not(feature = "advanced-eval"), test))]
+            o_rooks,
+            #[cfg(any(not(feature = "advanced-eval"), test))]
+            o_queens,
+            o_king: board.pieces[ob + 5],
+            o_diag: o_bishops | o_queens,
+            o_straight: o_rooks | o_queens,
+        }
+    }
+
+    /// Value of the `owner` piece worth `value` on `sq` if the opponent
+    /// attacks it more often than the owner defends it and at least one
+    /// attacker is cheap enough to take it profitably.
+    ///
+    /// Pins are not modelled — this is a static heuristic, not a full
+    /// exchange evaluation.
+    fn piece_value(&self, sq: u8, value: i32) -> i32 {
+        // Attacker's attacks on the target square, computed once and reused
+        // for the count and the cheap-attacker test.
+        let a_pawns = pawn_attackers_to(sq, self.attacker) & self.a_pawns;
+        let a_knights = knight_attacks(sq) & self.a_knights;
+        let a_diag = bishop_attacks(sq, self.occ) & self.a_diag;
+        let a_straight = rook_attacks(sq, self.occ) & self.a_straight;
+        let a_king = king_attacks(sq) & self.a_king;
+        let attackers = popcount(a_pawns | a_knights | a_diag | a_straight | a_king) as i32;
+        if attackers == 0 {
+            return 0;
+        }
+        // Count defenders, stopping as soon as they match the attackers
+        // (only "attacked more than defended" matters).
+        let mut defenders = popcount(pawn_attackers_to(sq, self.owner) & self.o_pawns) as i32;
+        if defenders < attackers {
+            defenders += popcount(knight_attacks(sq) & self.o_knights) as i32;
+        }
+        if defenders < attackers {
+            defenders += popcount(king_attacks(sq) & self.o_king) as i32;
+        }
+        if defenders < attackers {
+            defenders += popcount(bishop_attacks(sq, self.occ) & self.o_diag) as i32;
+        }
+        if defenders < attackers {
+            defenders += popcount(rook_attacks(sq, self.occ) & self.o_straight) as i32;
+        }
+        if attackers <= defenders {
+            return 0;
+        }
+        // Only a piece the attacker can profitably take is loose:
+        // undefended, or attacked by something no more valuable.
+        let cheap = if defenders == 0 {
+            1
+        } else {
+            let mut c = popcount(a_pawns) as i32;
+            if value >= 320 {
+                c += popcount(a_knights) as i32;
+            }
+            if value >= 330 {
+                c += popcount(a_diag) as i32;
+            }
+            if value >= 500 {
+                c += popcount(a_straight) as i32;
+            }
+            c
+        };
+        if cheap > 0 { value } else { 0 }
+    }
+
+    /// Sum of every loose piece this side owns.
+    #[cfg(any(not(feature = "advanced-eval"), test))]
+    fn total(&self) -> i32 {
+        let mut total = 0;
+        for (mut bb, value) in [
+            (self.o_knights, LOOSE_VALUE[1]),
+            (self.o_bishops, LOOSE_VALUE[2]),
+            (self.o_rooks, LOOSE_VALUE[3]),
+            (self.o_queens, LOOSE_VALUE[4]),
+        ] {
+            while bb != 0 {
+                let (sq, rest) = pop_lsb(bb);
+                bb = rest;
+                total += self.piece_value(sq, value);
+            }
+        }
+        total
     }
 }
 
@@ -1101,15 +1161,10 @@ impl Pressure {
 /// evaluation. Used by the Alpha style term and the Gamma unit tests.
 #[cfg(any(not(feature = "advanced-eval"), test))]
 fn loose_material_by_owner(board: &Board) -> [i32; 2] {
-    Pressure::scan(
-        board,
-        &EvalParams {
-            pressure_scale: 8,
-            alpha_own_loose: 1,
-            ..EvalParams::DEFAULT
-        },
-    )
-    .loose
+    [
+        LooseSide::new(board, Color::White).total(),
+        LooseSide::new(board, Color::Black).total(),
+    ]
 }
 
 /// Playstyle metrics for one side, used by the training harnesses to
@@ -1138,7 +1193,6 @@ pub fn style_stats(board: &Board, color: Color) -> StyleStats {
             pressure_scale: 8,
             trap_bonus: 1,
             king_pressure: 1,
-            alpha_own_loose: 1,
             ..EvalParams::DEFAULT
         },
     );
@@ -1209,6 +1263,9 @@ mod tests {
         assert!(EvalParams::from_spec("nonsense=3").is_err());
         assert!(EvalParams::from_spec("pressure_scale=x").is_err());
         assert!(EvalParams::from_spec("").is_ok());
+        // CLI/UCI/FFI/trainer reset aliases.
+        assert_eq!(EvalParams::from_spec_or_default("").unwrap(), EvalParams::DEFAULT);
+        assert_eq!(EvalParams::from_spec_or_default("DEFAULT").unwrap(), EvalParams::DEFAULT);
     }
 
     #[cfg(feature = "advanced-eval")]
@@ -1239,9 +1296,8 @@ mod tests {
         assert_ne!(base, evaluate_with(&b, &p));
     }
 
-    // The loose-material scan is Gamma-only (advanced eval), so this
-    // test only exists in the Gamma build.
-    #[cfg(feature = "advanced-eval")]
+    // The loose-material scan is shared: Gamma awards it through the pressure
+    // term, Alpha through its own-loose penalty, so both builds test it.
     #[test]
     fn loose_material_scan_works() {
         let loose = |b: &Board, c: Color| loose_material_by_owner(b)[c.idx()];

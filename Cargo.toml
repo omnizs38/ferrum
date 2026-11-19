@@ -31,8 +31,6 @@ qsearch = []
 advanced-eval = []
 large-tt = []
 
-[dependencies]
-
 [profile.release]
 opt-level = 3
 lto = "fat"

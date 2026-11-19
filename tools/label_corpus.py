@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Label the texel corpus with Stockfish scores (depth 10, UCI_Elo 3500 cap).
+"""Label the texel corpus with Stockfish scores (depth 6, UCI_Elo 3500 cap).
 Reads results/texel_corpus.txt, writes binary q3500 engine-vs-engine game scores
 (results/texel_corpus.jsonl, one JSON object per line, resumable)."""
-import subprocess, json, os, re, sys
+import subprocess, json, os, re
 
 CORPUS = "results/texel_corpus.txt"
 OUT = "results/texel_corpus.jsonl"

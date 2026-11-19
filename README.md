@@ -115,8 +115,9 @@ ferrum --version
 ## Strength probes (examples)
 
 ```sh
-cargo run --release --example bench    # startpos depth 4/6/7/8: nodes, PV
-cargo run --release --example tactics  # mate-in-1/2, win-of-queen, center
+cargo run --release --example bench     # startpos depth 4/6/7/8: nodes, PV
+cargo run --release --example tactics   # mate-in-1/2, win-of-queen, center
+cargo run --release --example evalbench # evaluation throughput (ns/eval)
 cargo run --release --no-default-features --example bench
 
 # In-process paired training match (200 games, same opening for both colours)
@@ -243,6 +244,7 @@ need NumPy):
 | Tool | Purpose |
 |---|---|
 | `gauntlet.py` | UCI match harness — plays paired games against another engine or a Stockfish anchor, writes `results/*.json` |
+| `sf_ladder.py` | Runs one gauntlet per Stockfish `UCI_Elo` anchor and prints the ladder |
 | `train.py` | Training driver — builds `examples/train` for a variant, runs SPSA over `EvalParams`, then a targeted style search; writes `training/*.json` |
 | `embed_demo.py` | Loads the built shared library via `ctypes` and runs an in-process search (server/bot smoke test) |
 | `speed.py` | Interleaved NPS comparison against another UCI engine (fixed nodes or fixed clock) |
@@ -252,7 +254,7 @@ need NumPy):
 | `compare_evals.py` | Evaluates a battery of positions with both engines and diffs them |
 | `build_corpus.py` | Builds a (FEN, side-to-move) corpus from the gauntlet games |
 | `label_corpus.py` | Labels that corpus with Stockfish scores |
-| `ferrum_eval.py` | NumPy replica of the Gamma evaluation (used by the tuner) |
+| `ferrum_eval.py` | NumPy replica of the Gamma evaluation used by the historical texel tuner (not kept in lock-step with the engine) |
 | `texel.py` / `texel_fit.py` | Texel feature extraction and weight fitting against Stockfish labels |
 
 ## Testing

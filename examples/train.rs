@@ -133,22 +133,6 @@ fn parse_args() -> Result<Config, String> {
     Ok(c)
 }
 
-fn params_from(spec: &str) -> Result<EvalParams, String> {
-    if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-        Ok(EvalParams::DEFAULT)
-    } else {
-        EvalParams::from_spec(spec)
-    }
-}
-
-fn search_from(spec: &str) -> Result<SearchParams, String> {
-    if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-        Ok(SearchParams::DEFAULT)
-    } else {
-        SearchParams::from_spec(spec)
-    }
-}
-
 // ---------------------------------------------------------------- RNG
 
 struct Rng(u64);
@@ -398,28 +382,28 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let a = match params_from(&cfg.a_spec) {
+    let a = match EvalParams::from_spec_or_default(&cfg.a_spec) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("train: A spec: {e}");
             std::process::exit(2);
         }
     };
-    let b = match params_from(&cfg.b_spec) {
+    let b = match EvalParams::from_spec_or_default(&cfg.b_spec) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("train: B spec: {e}");
             std::process::exit(2);
         }
     };
-    let sa = match search_from(&cfg.a_search) {
+    let sa = match SearchParams::from_spec_or_default(&cfg.a_search) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("train: A search spec: {e}");
             std::process::exit(2);
         }
     };
-    let sb = match search_from(&cfg.b_search) {
+    let sb = match SearchParams::from_spec_or_default(&cfg.b_search) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("train: B search spec: {e}");
@@ -435,7 +419,7 @@ fn main() {
     let next = AtomicUsize::new(0);
     let start = Instant::now();
 
-    let mut results: Vec<GameResult> = std::thread::scope(|scope| {
+    let results: Vec<GameResult> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
         for w in 0..workers {
             let next = &next;
@@ -464,7 +448,6 @@ fn main() {
         }
         all
     });
-    results.truncate(cfg.games);
 
     let mut t = Totals::default();
     for r in &results {
@@ -491,7 +474,10 @@ fn main() {
     let elo_hi = elo_from_p(hi);
     let elapsed = start.elapsed().as_secs_f64();
 
-    println!("Ferrum training match {}{}", if cfg.tag.is_empty() { "" } else { "[" }, cfg.tag);
+    match cfg.tag.as_str() {
+        "" => println!("Ferrum training match"),
+        tag => println!("Ferrum training match [{tag}]"),
+    }
     println!("A: {}", a.to_spec());
     println!("B: {}", b.to_spec());
     if sa != SearchParams::DEFAULT || sb != SearchParams::DEFAULT {

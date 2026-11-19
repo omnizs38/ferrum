@@ -114,9 +114,7 @@ fn uci_handshake_and_search() {
     assert_eq!(mv.len(), 4, "bestmove after ucinewgame should be a plain startpos move, got '{mv}'");
 
     send("quit");
-    let _ = child.wait_timeout(Duration::from_secs(5));
-    // `wait_timeout` needs `wait` fallback for portability.
-    match child.try_wait() {
+    match child.wait_timeout(Duration::from_secs(5)) {
         Ok(Some(_)) => {}
         Ok(None) => {
             let _ = child.kill();

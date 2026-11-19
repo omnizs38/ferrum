@@ -1,13 +1,14 @@
 //! UCI protocol handling.
 //!
 //! Implements `uci`, `isready`, `setoption`, `position`, `go` and `quit`
-//! plus the test helpers `d`, `eval` and `perft`. The search itself runs in
+//! plus the test helpers `d`, `eval`, `perft` and `divide`. The search runs in
 //! [`crate::search`]; this module only parses commands, manages the board /
 //! TT / thread state and prints `bestmove`.
 //!
 //! [`run_with_io`] runs the same loop over an arbitrary `BufRead`/`Write`
 //! pair, which is what servers embedding the engine (rather than spawning a
-//! process) use. The binary calls [`run`], which is just stdin/stdout.
+//! process) use. The binary calls [`run_with_config`] with its CLI options;
+//! [`run`] is the same loop on stdin/stdout with the defaults.
 
 use crate::board::Board;
 use crate::eval::{evaluate_with, EvalParams};
@@ -24,10 +25,11 @@ pub const ENGINE_NAME: &str = "Ferrum Gamma";
 pub const ENGINE_NAME: &str = "Ferrum Alpha";
 pub const ENGINE_AUTHOR: &str = "Ferrum";
 
+// Shared with the C ABI, which advertises the same limit.
 #[cfg(feature = "threads")]
-const MAX_THREADS: usize = 8;
+pub(crate) const MAX_THREADS: usize = 8;
 #[cfg(not(feature = "threads"))]
-const MAX_THREADS: usize = 1;
+pub(crate) const MAX_THREADS: usize = 1;
 
 /// Thread-safe line writer. A server may attach the engine to a pipe/socket
 /// (or several engines to one log), so every write is short and locks only
@@ -104,17 +106,15 @@ pub fn run_with_config<R: BufRead, W: Write + Send + 'static>(
     let out = Output::new(writer);
 
     let mut board = Board::startpos();
-    let mut tt = TranspositionTable::new(config.hash_mb.clamp(1, MAX_HASH_MB));
-    let mut threads: usize = config.threads.clamp(1, MAX_THREADS);
     let mut hash_mb = config.hash_mb.clamp(1, MAX_HASH_MB);
+    let mut tt = TranspositionTable::new(hash_mb);
+    let mut threads: usize = config.threads.clamp(1, MAX_THREADS);
     let mut eval_params = config.eval;
     let mut search_params = config.search;
-    let mut game_hashes: Vec<u64> = Vec::new();
+    // History of the position before the current one, for repetition.
+    let mut game_hashes: Vec<u64> = vec![board.hash];
     let mut stop_flag = Arc::new(AtomicBool::new(false));
     let mut search_handle: Option<std::thread::JoinHandle<()>> = None;
-
-    // History of the position before the current one, for repetition.
-    game_hashes.push(board.hash);
 
     let mut line = String::new();
     loop {
@@ -189,24 +189,16 @@ pub fn run_with_config<R: BufRead, W: Write + Send + 'static>(
                     }
                 } else if name.eq_ignore_ascii_case("evalparams") {
                     if let Some(spec) = value {
-                        if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-                            eval_params = EvalParams::DEFAULT;
-                        } else {
-                            match EvalParams::from_spec(&spec) {
-                                Ok(p) => eval_params = p,
-                                Err(e) => eprintln!("EvalParams rejected: {e}"),
-                            }
+                        match EvalParams::from_spec_or_default(&spec) {
+                            Ok(p) => eval_params = p,
+                            Err(e) => eprintln!("EvalParams rejected: {e}"),
                         }
                     }
                 } else if name.eq_ignore_ascii_case("searchparams") {
                     if let Some(spec) = value {
-                        if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-                            search_params = SearchParams::DEFAULT;
-                        } else {
-                            match SearchParams::from_spec(&spec) {
-                                Ok(p) => search_params = p,
-                                Err(e) => eprintln!("SearchParams rejected: {e}"),
-                            }
+                        match SearchParams::from_spec_or_default(&spec) {
+                            Ok(p) => search_params = p,
+                            Err(e) => eprintln!("SearchParams rejected: {e}"),
                         }
                     }
                 }
@@ -497,12 +489,7 @@ fn search_parallel<W: Write + Send + 'static>(
                 let tt_h = tt.clone();
                 let flag_h = stop.clone();
                 let hist_h = game_history.to_vec();
-                let lim = SearchLimits {
-                    time_ms: limits.time_ms,
-                    nodes: None,
-                    depth: (limits.depth - 1 - h as i32).max(1),
-                    infinite: limits.infinite,
-                };
+                let lim = limits.helper(h);
                 // Detached: `JoinHandle` dropped immediately; the thread
                 // exits at the next `should_stop` check once `stop` fires.
                 let _ = std::thread::spawn(move || {

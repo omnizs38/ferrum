@@ -4,10 +4,9 @@
 //!
 //! * **Ferrum Gamma** (default): multithreading, full transposition table,
 //!   the shared quiescence search, null-move pruning, late-move reduction,
-//!   advanced evaluation. Target ~2000–2400 Elo.
+//!   advanced evaluation.
 //! * **Ferrum Alpha** (`--no-default-features`): single-threaded, small TT,
 //!   the same shared quiescence search, no null-move/LMR, simple evaluation.
-//!   Target ~1200–1500 Elo.
 //!
 //! Alpha is Gamma with features removed — same core search, fewer extras.
 

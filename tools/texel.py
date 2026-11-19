@@ -2,19 +2,18 @@
 """Texel/distillation tuner for ferrum's Gamma evaluation tables.
 
 Features (per position): MG/EG PST counts (768+768), material counts (12),
-and positional scalar indicators (14). The model reproduces ferrum's exact
-tapered formula; weights start at the hand-written tables and are nudged
-toward minimizing squared error vs Stockfish labels (Huber).
+and positional scalar indicators (14). The model reproduces the historical
+tapered formula used by this tuner; texel_fit.py nudges the weights toward
+minimizing squared error vs Stockfish labels (Huber).
 
-Reads results/texel_corpus.jsonl (labels from tools/label_corpus.py),
-writes results/texel_fit.json with the fitted tables.
+Reads results/texel_corpus.jsonl (labels from tools/label_corpus.py) and
+writes results/texel_features.npz for tools/texel_fit.py.
 """
 import json, sys, time
 import numpy as np
 sys.path.insert(0, "tools")
-from ferrum_eval import (MG_VALUE, EG_VALUE, PST_MG, PST_EG, PASSED_BONUS,
-                         pst_index, parse_fen, color_bitboard, passed_pawn_mask,
-                         popcount, rook_files, king_safety, mobility, pawn_structure,
+from ferrum_eval import (PASSED_BONUS, pst_index, parse_fen, color_bitboard,
+                         passed_pawn_mask, popcount, KNIGHT_MASK, ray_attacks,
                          FILE_A, FILE_H)
 
 PIECE_NAMES = ["P", "N", "B", "R", "Q", "K"]
@@ -30,7 +29,6 @@ def positional_features(pieces_all, color):
     # mobility: N*4, B*3, R*2, Q*1 (capture weights as scalars ×1000 units)
     n_attacks = 0
     b = pieces_all[color][1]
-    from ferrum_eval import KNIGHT_MASK, ray_attacks
     while b:
         lsb = b & -b; sq = lsb.bit_length() - 1; b ^= lsb
         n_attacks += popcount(KNIGHT_MASK[sq] & ~own)
@@ -54,7 +52,6 @@ def positional_features(pieces_all, color):
         q_att += popcount((ray_attacks(sq, occ, [0,1,2,3]) | ray_attacks(sq, occ, [4,6,5,7])) & ~own)
     feats[3] = q_att
     # pawn structure pieces: doubled-same_file count, isolated count, blocked count, connected count
-    from ferrum_eval import FILE_A as FA, FILE_H as FH
     pawns = pieces_all[color][0]
     enemy_pawns = pieces_all['w' if color == 'b' else 'b'][0]
     if color == 'w':

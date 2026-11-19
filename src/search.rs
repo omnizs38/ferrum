@@ -45,6 +45,18 @@ impl SearchLimits {
     pub fn fixed_depth(depth: i32) -> SearchLimits {
         SearchLimits { time_ms: None, nodes: None, depth, infinite: false }
     }
+
+    /// Limits for a Lazy SMP helper thread. Helpers share the clock, get no
+    /// node budget of their own (they only warm the shared TT) and search one
+    /// ply shallower per helper index, never below depth 1.
+    pub(crate) fn helper(&self, index: usize) -> SearchLimits {
+        SearchLimits {
+            time_ms: self.time_ms,
+            nodes: None,
+            depth: (self.depth - 1 - index as i32).max(1),
+            infinite: self.infinite,
+        }
+    }
 }
 
 /// Trainable search prunings. `DEFAULT` is the trained baseline; a match of
@@ -197,25 +209,6 @@ impl SearchParams {
         null_r_base, null_r_div, asp_delta, iid_min_depth,
         probcut_margin, probcut_min_depth, probcut_r
     );
-
-    pub fn from_spec(spec: &str) -> Result<SearchParams, String> {
-        let mut p = SearchParams::DEFAULT;
-        crate::params::parse_spec(spec, |k, v| p.set(k, v))?;
-        Ok(p)
-    }
-
-    pub fn to_spec(&self) -> String {
-        let mut out = String::new();
-        for &key in Self::KEYS {
-            if !out.is_empty() {
-                out.push(',');
-            }
-            out.push_str(key);
-            out.push('=');
-            out.push_str(&self.get(key).to_string());
-        }
-        out
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -248,12 +241,7 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new(tt: TranspositionTable) -> Searcher {
-        Searcher::with_params(tt, EvalParams::DEFAULT)
-    }
-
-    /// A searcher that evaluates with explicit (e.g. trained) weights.
-    pub fn with_params(tt: TranspositionTable, params: EvalParams) -> Searcher {
-        Searcher::with_settings(tt, params, SearchParams::DEFAULT)
+        Searcher::with_settings(tt, EvalParams::DEFAULT, SearchParams::DEFAULT)
     }
 
     /// Full training hook: evaluation weights plus search prunings.
@@ -312,7 +300,6 @@ impl Searcher {
         // library/FFI callers that report the PV to a bot.
         let mut best_pv: Vec<Move> = Vec::new();
 
-        // Order root moves by TT move first so the first iteration is sensible.
         for depth in 1..=max_depth {
             if self.should_stop() && completed_depth > 0 {
                 break;
@@ -332,7 +319,6 @@ impl Searcher {
                 let elapsed = start.elapsed().as_millis().max(1) as u64;
                 let nps = (self.nodes * 1000) / elapsed;
                 let pv_moves = self.extract_pv();
-                best_pv = pv_moves.clone();
                 let pv_str = pv_moves
                     .iter()
                     .map(Move::to_uci)
@@ -347,13 +333,11 @@ impl Searcher {
                 } else {
                     format!(" pv {pv_str}")
                 };
+                best_pv = pv_moves;
                 on_info(format!(
                     "info depth {} score {} nodes {} nps {} time {}{}",
                     completed_depth, score_str, self.nodes, nps, elapsed, pv_suffix
                 ));
-            }
-            if limits.infinite {
-                continue;
             }
         }
 
@@ -403,8 +387,8 @@ impl Searcher {
                 return (score, mv);
             }
             if attempt == 4 {
-                // The fifth attempt used the widest window; fall through to
-                // one final full-window search rather than widening forever.
+                // All bounded attempts missed; stop widening and fall through
+                // to one full-window search.
                 break;
             }
             // Missed the window: re-center on the score with doubled radius.
@@ -412,8 +396,7 @@ impl Searcher {
             alpha = score - delta;
             beta = score + delta;
         }
-        // Should not reach here (attempt 4 uses a wide window), but return
-        // the last search result rather than looping forever.
+        // Every aspiration attempt missed the window: search it in full.
         self.negamax(board, depth, -INF, INF, 0, true, true)
     }
 
@@ -790,10 +773,9 @@ impl Searcher {
                 // Copy the child's PV line after our move.
                 let copy_len = child_len.saturating_sub(ply + 1);
                 for k in 0..copy_len {
-                    let src = ply + 1 + k;
-                    let dst = ply + 1 + k;
-                    if dst < MAX_PLY {
-                        self.pv_table[ply][dst] = self.pv_table[ply + 1][src];
+                    let at = ply + 1 + k;
+                    if at < MAX_PLY {
+                        self.pv_table[ply][at] = self.pv_table[ply + 1][at];
                     }
                 }
                 self.pv_len[ply] = child_len.max(ply + 1);
@@ -846,8 +828,8 @@ impl Searcher {
     }
 
     /// Quiescence search (shared core). Resolves captures and, when in
-    /// check, all evasions. Gamma additionally drops negative-SEE captures
-    /// (`qsearch` feature); Alpha keeps the full capture set.
+    /// check, all evasions. Both variants drop losing SEE captures outside
+    /// check; evasions are always searched.
     fn qsearch(&mut self, board: &mut Board, mut alpha: i32, beta: i32, ply: usize, qply: usize) -> i32 {
         self.nodes += 1;
         if ply >= MAX_PLY - 1 {
@@ -939,7 +921,7 @@ impl Searcher {
         // pawn further back and can never be reached again. The halfmove
         // clock counts plies since that move, so scan only that suffix.
         // (Before, the full game history — up to ~300 hashes — was scanned
-        // at every node; this is one slice instead of three linear scans.)
+        // at every node; now each of the two histories is one short slice.)
         let h = board.hash;
         let back = (board.halfmove as usize).min(self.game_hashes.len());
         let start = self.game_hashes.len() - back;
@@ -1030,7 +1012,7 @@ fn capture_score(board: &Board, m: &Move) -> i32 {
 /// Insertion-sort `moves` by descending `scores`. Move lists are short
 /// (tens), so insertion sort is plenty and keeps moves and scores
 /// together without a secondary buffer.
-fn sort_moves_by_score(moves: &mut crate::types::MoveList, scores: &mut [i32]) {
+fn sort_moves_by_score(moves: &mut MoveList, scores: &mut [i32]) {
     debug_assert_eq!(scores.len(), moves.len());
     for i in 1..moves.len() {
         let mut j = i;
@@ -1136,7 +1118,8 @@ fn least_attacker(board: &Board, side: Color, to: u8, occ: u64) -> Option<(u8, i
 
 /// Static Exchange Evaluation: net material gain for the mover if the
 /// exchange on `m.to` resolves optimally (pure material). >=0 wins,
-/// <0 loses. Used to prune hopeless captures in qsearch.
+/// <0 loses. Used by qsearch SEE pruning and the optional ProbCut /
+/// capture-LMR gates.
 fn see(board: &Board, m: &Move) -> i32 {
     if !m.is_capture && m.promo.is_none() { return 0; }
     let attacker = match board.piece_on(m.from) {
@@ -1240,18 +1223,14 @@ pub fn is_insufficient_material(board: &Board) -> bool {
 
 /// Convenience: search a position synchronously (no threads, no info).
 pub fn search_position(board: &mut Board, game_history: &[u64], limits: &SearchLimits, tt: &TranspositionTable) -> SearchInfo {
-    search_position_with_params(board, game_history, limits, tt, EvalParams::DEFAULT)
-}
-
-/// Same, with explicit evaluation weights (used by the training harness).
-pub fn search_position_with_params(
-    board: &mut Board,
-    game_history: &[u64],
-    limits: &SearchLimits,
-    tt: &TranspositionTable,
-    params: EvalParams,
-) -> SearchInfo {
-    search_position_with_settings(board, game_history, limits, tt, params, SearchParams::DEFAULT)
+    search_position_with_settings(
+        board,
+        game_history,
+        limits,
+        tt,
+        EvalParams::DEFAULT,
+        SearchParams::DEFAULT,
+    )
 }
 
 /// Full training hook: evaluation weights plus search prunings.
@@ -1364,6 +1343,11 @@ mod tests {
         assert_eq!(SearchParams::from_spec(&spec).unwrap(), SearchParams::DEFAULT);
         assert!(SearchParams::from_spec("nope=1").is_err());
         assert!(SearchParams::from_spec("lmr_div=x").is_err());
+        assert_eq!(SearchParams::from_spec_or_default("").unwrap(), SearchParams::DEFAULT);
+        assert_eq!(
+            SearchParams::from_spec_or_default("default").unwrap(),
+            SearchParams::DEFAULT
+        );
         let p = SearchParams::from_spec("qsearch=0; lmp_base=7").unwrap();
         assert_eq!(p.qsearch, 0);
         assert_eq!(p.lmp_base, 7);

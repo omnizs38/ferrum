@@ -4,7 +4,7 @@
 Includes opening traps (material-halving motifs where tactical vision decides),
 quiet positions, sharp midgames, and endgames.
 """
-import subprocess, sys
+import subprocess
 
 ENGINES = ["target/release/ferrum-gamma.exe", "target/release/ferrum-alpha.exe"]
 
@@ -26,26 +26,22 @@ def fen_eval(exe, fen):
     p.stdin.write("isready\n"); p.stdin.flush()
     p.stdin.write(f"position fen {fen}\n"); p.stdin.flush()
     p.stdin.write("eval\n"); p.stdin.flush()
-    p.stdin.write("d\n"); p.stdin.flush()
-    result = {}
+    value = None
     for _ in range(20):
         line = p.stdout.readline().rstrip()
         if line.startswith("eval "):
-            result["eval"] = int(line.split()[1])
-        elif " / " in line and " " in line and line.count("/") >= 7 and (" w " in line or " b " in line) and "eval" not in result:
-            result["fen"] = line
-        if "eval" in result:
+            value = int(line.split()[1])
             break
     p.stdin.write("quit\n"); p.stdin.flush()
     try:
         p.wait(timeout=3)
     except Exception:
         p.kill()
-    return result
+    return value
 
 print(f"{'position':34s} {'Gamma':>6} {'Alpha':>6} {'G-A':>6}")
 for name, fen in POSITIONS:
-    g = fen_eval(ENGINES[0], fen).get("eval")
-    a = fen_eval(ENGINES[1], fen).get("eval")
+    g = fen_eval(ENGINES[0], fen)
+    a = fen_eval(ENGINES[1], fen)
     diff = g - a if g is not None and a is not None else "?"
     print(f"{name:34s} {g!s:>6} {a!s:>6} {diff:>6}")

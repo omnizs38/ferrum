@@ -76,7 +76,7 @@ fn main() {
             },
             "--eval-params" => {
                 let spec = take_value(&args, &mut i, arg, "spec");
-                match EvalParams::from_spec(&spec) {
+                match EvalParams::from_spec_or_default(&spec) {
                     Ok(p) => config.eval = p,
                     Err(e) => {
                         eprintln!("ferrum: --eval-params: {e}");
@@ -86,7 +86,7 @@ fn main() {
             }
             "--search-params" => {
                 let spec = take_value(&args, &mut i, arg, "spec");
-                match SearchParams::from_spec(&spec) {
+                match SearchParams::from_spec_or_default(&spec) {
                     Ok(p) => config.search = p,
                     Err(e) => {
                         eprintln!("ferrum: --search-params: {e}");

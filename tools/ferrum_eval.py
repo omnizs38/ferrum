@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Numpy replica of ferrum's Gamma evaluation (src/eval.rs), exact integer math.
-Used by the texel tuner. `eval_stm(fen)` must match ferrum's `eval` command."""
-import math
+"""Historical NumPy replica of ferrum's Gamma evaluation (src/eval.rs).
+
+Used by the texel tuner. It predates the current trainable style terms and
+is not kept in lock-step with the engine; treat it as approximate."""
 
 MG_VALUE = [82, 337, 365, 477, 1025, 0]
 EG_VALUE = [94, 281, 297, 512, 936, 0]
@@ -30,9 +31,6 @@ def pst_index(sq, color):
     return (7 - r) * 8 + f if color == 'w' else r * 8 + f
 
 KNIGHT_MASK = [0] * 64
-KING_MASK = [0] * 64
-PAWN_MASK_W = [0] * 64
-PAWN_MASK_B = [0] * 64
 STEP = [[255] * 8 for _ in range(64)]
 DIRS = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(-1,1),(1,-1),(-1,-1)]
 for sq in range(64):
@@ -40,16 +38,6 @@ for sq in range(64):
     for df, dr in [(1,2),(2,1),(2,-1),(1,-2),(-1,-2),(-2,-1),(-2,1),(-1,2)]:
         nf, nr = f+df, r+dr
         if 0 <= nf < 8 and 0 <= nr < 8: KNIGHT_MASK[sq] |= 1 << (nr*8+nf)
-    for df in (-1,0,1):
-        for dr in (-1,0,1):
-            if df == 0 and dr == 0: continue
-            nf, nr = f+df, r+dr
-            if 0 <= nf < 8 and 0 <= nr < 8: KING_MASK[sq] |= 1 << (nr*8+nf)
-    for df in (-1, 1):
-        nf = f + df
-        if not (0 <= nf < 8): continue
-        if r < 7: PAWN_MASK_W[sq] |= 1 << ((r+1)*8+nf)
-        if r > 0: PAWN_MASK_B[sq] |= 1 << ((r-1)*8+nf)
     for d, (df, dr) in enumerate(DIRS):
         nf, nr = f+df, r+dr
         if 0 <= nf < 8 and 0 <= nr < 8: STEP[sq][d] = nr*8+nf
@@ -84,13 +72,6 @@ def passed_pawn_mask(sq, color):
         else:
             for nr in range(0, r): mask |= 1 << (nr*8 + nf)
     return mask
-
-def sliding_attacks(sq, piece_type, occ):
-    if piece_type == 2:  # bishop
-        return ray_attacks(sq, occ, [4, 6, 5, 7])
-    if piece_type == 3:  # rook
-        return ray_attacks(sq, occ, [0, 1, 2, 3])
-    return ray_attacks(sq, occ, [0, 1, 2, 3, 4, 5, 6, 7])
 
 def parse_fen(fen):
     parts = fen.split()
@@ -229,11 +210,6 @@ def taper(mg, eg, phase):
 
 def evaluate_color(pieces_all, color):
     mg, eg, phase = taper_material(pieces_all, color)
-    occ = 0
-    for c in 'wb':
-        for p in pieces_all[c]:
-            occ |= p
-    own = color_bitboard(pieces_all[color], color)
     bonus = 0
     bonus += mobility(pieces_all, color)
     bonus += pawn_structure(pieces_all[color][0], pieces_all['w' if color == 'b' else 'b'][0], color)

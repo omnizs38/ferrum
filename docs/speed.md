@@ -87,6 +87,41 @@ At a fixed 100 ms clock the middlegame position reached **depth 8 instead of
 depth 7** (depth sum 36 vs 35 across the four positions), which is the point:
 the same clock buys a deeper search.
 
+### 2026-11-18: Alpha's loose-material scan (node-identical)
+
+Alpha's simple evaluation was doing roughly eight times the work it needed
+for its defensive term, and doing it twice per node:
+
+* `alpha_style` was called once per colour and each call ran
+  `loose_material_by_owner` — two scans per evaluation.
+* That scan called the whole `Pressure::scan` with a style-test `EvalParams`
+  (`pressure_scale: 8`, `alpha_own_loose: 1`, rest default), so it computed
+  loose material **plus** trapped pieces, king-ring pressure and full
+  N/B/R/Q mobility for both colours, then discarded everything except
+  `.loose`.
+
+Now `evaluate_with` runs one two-colour loose pass per node, and the loose
+test lives in `LooseSide::piece_value`, which `Pressure::scan` calls from the
+per-piece loop it already runs. Alpha's `LooseSide::total` never touches the
+mobility, trapped-piece or king-ring code; Gamma's pass is unchanged.
+
+Node counts are identical: Gamma d8 **19,951**, Alpha d8 **216,764** (all
+depths unchanged), tactics unchanged. Measured with the canonical
+fixed-node method (`tools/speed.py`, 3M nodes, 1 thread, 64 MB hash,
+interleaved positions):
+
+| Build | Median NPS | Time for 3M nodes |
+|---|---|---|
+| Alpha before | 1,241,158 | 2,510 ms |
+| Alpha after | 1,478,624 | 2,040 ms |
+| ratio | **1.19x** | **0.82x** |
+
+The gain is larger where the board is crowded and smaller in the endgame,
+as expected for a per-piece term: Kiwipete and the middlegame improved
+~1.3x, startpos ~1.07x, the endgame ~1.10x. At **fixed depth** (the bench,
+where evaluation dominates) Alpha's d8 search drops from ~141 ms to ~101 ms
+(~1.40x). Gamma is neutral in both measurements.
+
 ### Why the native build helps
 
 The default x86-64 build targets SSE2. `target-cpu=native` enables the

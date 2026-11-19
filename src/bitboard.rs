@@ -159,9 +159,8 @@ pub fn passed_pawn_mask(sq: u8, color: Color) -> Bitboard {
     }
 }
 
-/// Piece attacks (ray stepping first): the module only wires the fast
-/// path in via [`crate::sliders`], which is validated exhaustively against
-/// ray walking at startup-table build time.
+/// Slider attacks: the lookup lives in [`crate::sliders`], whose tables are
+/// validated exhaustively against ray walking by the module's test.
 pub fn rook_attacks(sq: u8, occupied: Bitboard) -> Bitboard {
     crate::sliders::rook_attacks(sq, occupied)
 }

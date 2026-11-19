@@ -58,15 +58,11 @@ use crate::board::Board;
 use crate::eval::{evaluate_with, EvalParams};
 use crate::search::{mate_in, SearchInfo, SearchLimits, SearchParams, Searcher};
 use crate::tt::{default_hash_mb, TranspositionTable, MAX_HASH_MB};
+use crate::uci::MAX_THREADS;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-#[cfg(feature = "threads")]
-const FFI_MAX_THREADS: usize = 8;
-#[cfg(not(feature = "threads"))]
-const FFI_MAX_THREADS: usize = 1;
 
 pub const ERR_NULL: i32 = -1;
 pub const ERR_UTF8: i32 = -2;
@@ -90,9 +86,10 @@ pub struct FerrumEngine {
 impl FerrumEngine {
     fn new() -> FerrumEngine {
         let hash_mb = default_hash_mb();
+        let board = Board::startpos();
         FerrumEngine {
-            board: Board::startpos(),
-            game_hashes: vec![Board::startpos().hash],
+            game_hashes: vec![board.hash],
+            board,
             tt: TranspositionTable::new(hash_mb),
             hash_mb,
             threads: 1,
@@ -296,17 +293,13 @@ pub unsafe extern "C" fn ferrum_set_option(
         } else if name.eq_ignore_ascii_case("threads") {
             match value.parse::<usize>() {
                 Ok(v) => {
-                    e.threads = v.clamp(1, FFI_MAX_THREADS);
+                    e.threads = v.clamp(1, MAX_THREADS);
                     0
                 }
                 Err(_) => ERR_VALUE,
             }
         } else if name.eq_ignore_ascii_case("evalparams") {
-            if value.is_empty() || value.eq_ignore_ascii_case("default") {
-                e.eval = EvalParams::DEFAULT;
-                return 0;
-            }
-            match EvalParams::from_spec(value) {
+            match EvalParams::from_spec_or_default(value) {
                 Ok(p) => {
                     e.eval = p;
                     0
@@ -314,11 +307,7 @@ pub unsafe extern "C" fn ferrum_set_option(
                 Err(_) => ERR_VALUE,
             }
         } else if name.eq_ignore_ascii_case("searchparams") {
-            if value.is_empty() || value.eq_ignore_ascii_case("default") {
-                e.search = SearchParams::DEFAULT;
-                return 0;
-            }
-            match SearchParams::from_spec(value) {
+            match SearchParams::from_spec_or_default(value) {
                 Ok(p) => {
                     e.search = p;
                     0
@@ -364,7 +353,7 @@ fn limits_from(movetime_ms: u64, depth: i32, nodes: u64) -> SearchLimits {
 }
 
 fn search_handle(e: &mut FerrumEngine, limits: &SearchLimits) -> SearchInfo {
-    let threads = e.threads.clamp(1, FFI_MAX_THREADS);
+    let threads = e.threads.clamp(1, MAX_THREADS);
     if threads <= 1 {
         let mut s = Searcher::with_settings(e.tt.clone(), e.eval, e.search);
         return s.search(&mut e.board, &e.game_hashes, limits, None, &|_| {});
@@ -378,12 +367,7 @@ fn search_handle(e: &mut FerrumEngine, limits: &SearchLimits) -> SearchInfo {
             let mut board = e.board.clone();
             let history = e.game_hashes.clone();
             let flag = stop.clone();
-            let lim = SearchLimits {
-                time_ms: limits.time_ms,
-                nodes: None,
-                depth: (limits.depth - 1 - h as i32).max(1),
-                infinite: limits.infinite,
-            };
+            let lim = limits.helper(h);
             let params = e.eval;
             let sparams = e.search;
             scope.spawn(move || {
@@ -408,7 +392,7 @@ fn run_search(
     threads: i32,
 ) -> SearchInfo {
     if threads > 0 {
-        e.threads = (threads as usize).clamp(1, FFI_MAX_THREADS);
+        e.threads = (threads as usize).clamp(1, MAX_THREADS);
     }
     search_handle(e, &limits_from(movetime_ms, depth, nodes))
 }
@@ -495,8 +479,9 @@ pub unsafe extern "C" fn ferrum_evaluate(engine: *mut FerrumEngine) -> i32 {
     .unwrap_or(i32::MIN)
 }
 
-/// Best move for the current position without searching (null if none):
-/// a cheap legal-move probe for bots that only need a fallback.
+/// Best move for the current position without searching, as UCI text
+/// (`"(none)"` when there is no legal move). Null only on a null handle or
+/// panic. A cheap legal-move probe for bots that need a fallback.
 #[no_mangle]
 pub unsafe extern "C" fn ferrum_legal_move(engine: *mut FerrumEngine) -> *mut c_char {
     guard_ptr(|| {

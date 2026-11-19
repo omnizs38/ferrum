@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a (FEN, side-to-move) corpus from all gauntlet games. Replays each
 game with ferrum's own UCI `d` command for FENs. Dedupes by position key."""
-import json, glob, subprocess, sys, re
+import json, glob, subprocess
 
 def ferrum_positions():
     p = subprocess.Popen(["target/release/ferrum-gamma.exe"], stdin=subprocess.PIPE,
@@ -31,7 +31,6 @@ def ferrum_positions():
             outcome = r["result"]
             if outcome not in ("1-0", "0-1", "1/2-1/2"):
                 continue
-            player_a_is_white = (r.get("white_label", "") != "" and "white_label" in r) or True
             for i in range(1, len(moves) + 1):
                 mv = " ".join(moves[:i])
                 send(f"position startpos moves {mv}")

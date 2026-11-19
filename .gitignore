@@ -22,3 +22,27 @@ __pycache__/
 # User's personal Chess.com analysis (never commit)
 tools/_game.pgn
 tools/analyze_game.py
+
+# Local tooling / environment (optional, user-specific)
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.local
+
+# Personal scratch files and local helper scripts (optional, never commit)
+notes/
+scratch/
+tools/local_*.py
+tools/scratch_*.py
+
+# Gauntlet variant binaries copied out of target/ for A/B matches
+ferrum-gamma
+ferrum-alpha
+ferrum-gamma.exe
+ferrum-alpha.exe
+
+# Local match logs and games
+*.pgn
+*.log

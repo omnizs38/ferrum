@@ -305,4 +305,4 @@ eval) rather than better testing.
 
 ## License
 
-GPL-3.0-or-later (see `LICENSE`).
+AGPL-3.0-or-later (see `LICENSE`).
